@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#0b0f1a">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-192.png">
+<title>Coyote Controller</title>
+<style>
+  :root{--bg:#0b0f1a;--card:#151b2c;--line:#2a3350;--text:#e8ecf8;--dim:#8d97b5;--a:#3dd6ff;--b:#ff5fd2;--acc:#ffa930;--stop:#e5262b}
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Noto Sans JP",sans-serif}
+  body{padding:12px 12px 120px;max-width:560px;margin:0 auto}
+  header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px}
+  h1{font-size:18px;margin:0}
+  .pill{font-size:13px;color:var(--dim);display:flex;gap:10px;align-items:center}
+  .dot{width:10px;height:10px;border-radius:50%;background:#555;display:inline-block}
+  .dot.on{background:#3ddc84}
+  button{font:inherit;color:var(--text);background:#242c47;border:1px solid var(--line);border-radius:10px;min-height:48px;padding:0 14px}
+  button:active{filter:brightness(1.3)}
+  .primary{background:#2c5bd8;border-color:#2c5bd8;width:100%;font-weight:600}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px;margin:10px 0}
+  .ch .head{display:flex;justify-content:space-between;align-items:baseline}
+  .ch .name{font-weight:700;font-size:16px}
+  .ch.A .name,.ch.A .val{color:var(--a)}
+  .ch.B .name,.ch.B .val{color:var(--b)}
+  .val{font-size:44px;font-weight:700;font-variant-numeric:tabular-nums}
+  .sub{font-size:12px;color:var(--dim)}
+  .steps{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:8px 0}
+  input[type=range]{width:100%;height:44px;accent-color:var(--a)}
+  .B input[type=range]{accent-color:var(--b)}
+  .presets{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+  .presets button.sel{background:var(--acc);color:#111;border-color:var(--acc);font-weight:700}
+  details summary{min-height:44px;display:flex;align-items:center;cursor:pointer}
+  .row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:8px 0}
+  .row input{width:90px;min-height:40px;background:#0e1322;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:0 8px;font:inherit}
+  #msg{font-size:13px;color:var(--dim);min-height:18px;margin:6px 2px}
+  #stop{position:fixed;left:12px;right:12px;bottom:12px;max-width:536px;margin:0 auto;min-height:72px;background:var(--stop);border-color:#ff6a6e;font-size:22px;font-weight:800;letter-spacing:2px;border-radius:16px;z-index:9}
+</style>
+</head>
+<body>
+<header>
+  <h1>Coyote Controller</h1>
+  <div class="pill"><span class="dot" id="dot"></span><span id="status">未接続</span><span id="batt"></span></div>
+</header>
+
+<button class="primary" id="connectBtn">接続（47L…を検索）</button>
+<div id="msg"></div>
+
+<div class="card ch A" id="chA"></div>
+<div class="card ch B" id="chB"></div>
+
+<div class="card">
+  <div class="sub" style="margin-bottom:8px">波形プリセット（A/B共通）</div>
+  <div class="presets" id="presets"></div>
+</div>
+
+<details class="card">
+  <summary>設定（ソフトリミット / バランス）</summary>
+  <div class="row"><span>ソフトリミット A (0-200)</span><input id="limA" type="number" min="0" max="200" inputmode="numeric"></div>
+  <div class="row"><span>ソフトリミット B (0-200)</span><input id="limB" type="number" min="0" max="200" inputmode="numeric"></div>
+  <div class="row"><span>周波数バランス (0-255)</span><input id="balF" type="number" min="0" max="255" inputmode="numeric"></div>
+  <div class="row"><span>パルス幅バランス (0-255)</span><input id="balP" type="number" min="0" max="255" inputmode="numeric"></div>
+  <button id="applyBtn" style="width:100%">設定を適用（本体へBF送信）</button>
+  <div class="sub" style="margin-top:8px">ソフトリミットは必ず安全な値にしてください。スライダーの上限もこの値になります。初回は低い強度から確認してください。強度を上げるときは1回につき最大+5ずつ上がります。アプリを切り替えたり画面が隠れたりすると、自動で緊急停止します。</div>
+</details>
+
+<button id="stop">緊急停止</button>
+
+<script>
+(() => {
+'use strict';
+const $ = s => document.querySelector(s);
+
+// ---------- Coyote 3.0 GATT ----------
+const SVC_MAIN = 0x180c, CH_WRITE = 0x150a, CH_NOTIFY = 0x150b;
+const SVC_BATT = 0x180a, CH_BATT = 0x1500;
+
+// ---------- 安全設定 ----------
+const DEFAULTS = {limA:60, limB:60, balF:160, balP:0};   // バランス値は仮置き（公式推奨値は未確認）
+const MAX_STEP_UP = 5;        // 強度を上げるときの1回あたりの上限（下げるときは一気に）
+const B1_TIMEOUT_MS = 600;    // B1 の応答を待つ時間。過ぎたら再送する
+
+// ---------- 波形プリセット ----------
+// shape: 'sine' | 'square' / freq: Hz / str: 強度エンベロープ(0-100%)
+const PRESETS = [
+  {name:'Steady',    shape:'square', fMin:10, fMax:10, fCycle:1,    sMin:100, sMax:100, sCycle:1000},
+  {name:'Breath',    shape:'sine',   fMin:5,  fMax:20, fCycle:4000, sMin:20,  sMax:80,  sCycle:4000},
+  {name:'Tide',      shape:'sine',   fMin:3,  fMax:15, fCycle:6000, sMin:10,  sMax:90,  sCycle:3000},
+  {name:'PulseLow',  shape:'square', fMin:2,  fMax:2,  fCycle:1,    sMin:10,  sMax:45,  sCycle:800},
+  {name:'PulseMid',  shape:'square', fMin:8,  fMax:8,  fCycle:1,    sMin:10,  sMax:55,  sCycle:500},
+  {name:'PulseHigh', shape:'square', fMin:20, fMax:20, fCycle:1,    sMin:10,  sMax:65,  sCycle:250},
+  {name:'Tap',       shape:'square', fMin:30, fMax:30, fCycle:1,    sMin:0,   sMax:70,  sCycle:120},
+];
+
+// 周期(ms) → V3の周波数入力値(10-240)。10-100はそのまま、101-600は(x-100)/5+100、601-1000は(x-600)/10+200
+function periodToRaw(ms){
+  ms = Math.max(10, Math.min(1000, Math.round(ms)));
+  let r = ms <= 100 ? ms : ms <= 600 ? (ms - 100) / 5 + 100 : (ms - 600) / 10 + 200;
+  return Math.max(10, Math.min(240, Math.round(r)));
+}
+function sample(p, t){
+  let hz = p.fMax;
+  if (p.shape === 'sine') {
+    const s = (1 - Math.cos(2 * Math.PI * ((t % p.fCycle) / p.fCycle))) / 2;
+    hz = p.fMin + s * (p.fMax - p.fMin);
+  }
+  let pct;
+  if (p.shape === 'sine') {
+    const s = (1 - Math.cos(2 * Math.PI * ((t % p.sCycle) / p.sCycle))) / 2;
+    pct = p.sMin + s * (p.sMax - p.sMin);
+  } else {
+    pct = (t % p.sCycle) < p.sCycle / 2 ? p.sMax : p.sMin;
+  }
+  return {f: periodToRaw(1000 / Math.max(hz, 0.5)), s: Math.max(0, Math.min(100, Math.round(pct)))};
+}
+
+// ---------- 状態 ----------
+const st = {
+  dev:null, chW:null, connected:false,
+  tA:0, tB:0, aA:null, aB:null,     // 目標 / 本体から通知された実強度（null は不明）
+  seq:0, pending:0, pendingAt:0,
+  preset:0, t0:performance.now(), timer:null, qd:0, queue:Promise.resolve(),
+  lim:{A:DEFAULTS.limA, B:DEFAULTS.limB}, balF:DEFAULTS.balF, balP:DEFAULTS.balP, batt:null, wl:null
+};
+
+// 整数に丸めて範囲内に収める。数値でなければ既定値
+function clampInt(v, mx, def){
+  const n = Number(v);
+  if (v === null || v === '' || !Number.isFinite(n)) return def;
+  return Math.max(0, Math.min(mx, Math.round(n)));
+}
+try {
+  const s = JSON.parse(localStorage.getItem('coyote-settings') || 'null');
+  if (s && typeof s === 'object') {
+    st.lim.A = clampInt(s.limA, 200, DEFAULTS.limA);
+    st.lim.B = clampInt(s.limB, 200, DEFAULTS.limB);
+    st.balF  = clampInt(s.balF, 255, DEFAULTS.balF);
+    st.balP  = clampInt(s.balP, 255, DEFAULTS.balP);
+  }
+} catch(e) {}
+function saveSettings(){
+  try { localStorage.setItem('coyote-settings', JSON.stringify({limA:st.lim.A, limB:st.lim.B, balF:st.balF, balP:st.balP})); } catch(e) {}
+}
+
+// ---------- UI ----------
+function buildChannel(el, ch){
+  el.innerHTML = `
+    <div class="head"><span class="name">チャンネル ${ch}</span><span class="sub">実強度 <b id="act${ch}">-</b> / 上限 <b id="lim${ch}v"></b></span></div>
+    <div class="val" id="val${ch}">0</div>
+    <input type="range" id="sl${ch}" min="0" max="200" value="0">
+    <div class="steps">
+      <button data-ch="${ch}" data-d="-5">−5</button><button data-ch="${ch}" data-d="-1">−1</button>
+      <button data-ch="${ch}" data-d="1">＋1</button><button data-ch="${ch}" data-d="5">＋5</button>
+    </div>`;
+}
+buildChannel($('#chA'), 'A');
+buildChannel($('#chB'), 'B');
+$('#presets').innerHTML = PRESETS.map((p, i) => `<button data-p="${i}">${p.name}</button>`).join('');
+
+function render(){
+  for (const ch of ['A','B']) {
+    $('#val'+ch).textContent = st['t'+ch];
+    $('#act'+ch).textContent = st['a'+ch] == null ? '-' : st['a'+ch];
+    $('#lim'+ch+'v').textContent = st.lim[ch];
+    const sl = $('#sl'+ch);
+    sl.max = st.lim[ch];
+    sl.value = st['t'+ch];
+  }
+  document.querySelectorAll('#presets button').forEach((b, i) => b.classList.toggle('sel', i === st.preset));
+  $('#limA').value = st.lim.A; $('#limB').value = st.lim.B;
+  $('#balF').value = st.balF;  $('#balP').value = st.balP;
+  $('#dot').classList.toggle('on', st.connected);
+  $('#status').textContent = st.connected ? '接続中' : '未接続';
+  $('#batt').textContent = st.batt != null ? `🔋${st.batt}%` : '';
+  $('#connectBtn').textContent = st.connected ? '切断' : '接続（47L…を検索）';
+}
+function msg(t){ $('#msg').textContent = t || ''; }
+
+function setTarget(ch, v){
+  st['t'+ch] = Math.max(0, Math.min(st.lim[ch], Math.round(v)));
+  render();
+}
+
+document.addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  if (b.dataset.d) setTarget(b.dataset.ch, st['t'+b.dataset.ch] + Number(b.dataset.d));
+  if (b.dataset.p) { st.preset = Number(b.dataset.p); render(); }
+});
+for (const ch of ['A','B']) $('#sl'+ch).addEventListener('input', e => setTarget(ch, Number(e.target.value)));
+$('#stop').addEventListener('click', () => emergency());
+$('#connectBtn').addEventListener('click', () => st.connected ? disconnect() : connect());
+$('#applyBtn').addEventListener('click', async () => {
+  st.lim.A = clampInt($('#limA').value, 200, st.lim.A);
+  st.lim.B = clampInt($('#limB').value, 200, st.lim.B);
+  st.balF  = clampInt($('#balF').value, 255, st.balF);
+  st.balP  = clampInt($('#balP').value, 255, st.balP);
+  saveSettings();
+  setTarget('A', st.tA); setTarget('B', st.tB);   // 上限を超えていたら丸める
+  if (st.connected) {
+    try { await sendBF(); msg('設定を本体へ送信しました'); }
+    catch(e) { msg('設定の送信に失敗しました: ' + (e && e.message ? e.message : e)); }
+  }
+  render();
+});
+
+// ---------- 送信 ----------
+function write(buf){
+  if (st.chW.writeValueWithoutResponse) return st.chW.writeValueWithoutResponse(buf);
+  return st.chW.writeValue(buf);
+}
+// urgent: 強度変更・緊急停止など、捨ててはいけない送信
+function send(buf, urgent){
+  if (!st.chW) return;
+  if (!urgent && st.qd > 2) return;          // 詰まっているときは周期データを捨てる
+  st.qd++;
+  st.queue = st.queue.then(() => st.chW && write(buf)).catch(() => {}).then(() => { st.qd--; });
+}
+async function sendBF(){
+  const b = new Uint8Array([0xBF, st.lim.A, st.lim.B, st.balF, st.balF, st.balP, st.balP]);
+  await write(b);
+}
+// silent: 波形の強度を全て0にする（緊急停止用）
+function frame(seq, mode, vA, vB, t, silent){
+  const p = PRESETS[st.preset];
+  const b = new Uint8Array(20);
+  b[0] = 0xB0; b[1] = (seq << 4) | mode; b[2] = vA; b[3] = vB;
+  for (let i = 0; i < 4; i++) {
+    const s = sample(p, t + i * 25);
+    const amp = silent ? 0 : s.s;
+    b[4+i] = s.f; b[8+i] = amp;     // A: 周波数4 / 強度4
+    b[12+i] = s.f; b[16+i] = amp;   // B: 周波数4 / 強度4
+  }
+  return b;
+}
+function nextSeq(){ st.seq = st.seq % 15 + 1; return st.seq; }
+
+// 上げるときは MAX_STEP_UP ずつ、下げるときは一気に。実強度が不明なら0とみなす
+function stepToward(actual, target){
+  const base = actual == null ? 0 : actual;
+  return target <= base ? target : Math.min(target, base + MAX_STEP_UP);
+}
+
+// 100msごと。強度の変更はシーケンス番号付きで1回だけ送り、B1の応答を待つ
+function tick(){
+  if (!st.connected) return;
+  const now = performance.now();
+  if (st.pending && now - st.pendingAt > B1_TIMEOUT_MS) st.pending = 0;   // 応答なし。差分が残っていれば下で再送
+  let mode = 0, seq = 0, vA = 0, vB = 0;
+  if (!st.pending && (st.tA !== st.aA || st.tB !== st.aB)) {
+    seq = nextSeq();
+    if (st.tA !== st.aA) { mode |= 0b1100; vA = stepToward(st.aA, st.tA); }   // 上位2bit=A, 絶対値設定
+    if (st.tB !== st.aB) { mode |= 0b0011; vB = stepToward(st.aB, st.tB); }   // 下位2bit=B, 絶対値設定
+    st.pending = seq; st.pendingAt = now;
+  }
+  send(frame(seq, mode, vA, vB, now - st.t0, false), seq !== 0);
+}
+
+function emergency(reason){
+  st.tA = st.tB = 0;
+  if (st.connected) {
+    const seq = nextSeq();
+    st.pending = seq; st.pendingAt = performance.now();
+    for (let i = 0; i < 2; i++) send(frame(seq, 0b1111, 0, 0, performance.now() - st.t0, true), true);
+  }
+  if (reason) msg(reason);
+  try { navigator.vibrate && navigator.vibrate(120); } catch(e) {}
+  render();
+}
+
+// ---------- 受信 ----------
+function onNotify(e){
+  const d = e.target.value;
+  if (d.byteLength >= 4 && d.getUint8(0) === 0xB1) {
+    const seq = d.getUint8(1);
+    st.aA = d.getUint8(2); st.aB = d.getUint8(3);
+    if (seq !== 0 && seq === st.pending) st.pending = 0;
+    if (seq === 0) {                       // 本体のダイヤル操作など：UIを実機に合わせる（上限は超えない）
+      st.tA = Math.min(st.aA, st.lim.A);
+      st.tB = Math.min(st.aB, st.lim.B);
+    }
+    render();
+  }
+}
+
+// ---------- 接続 ----------
+async function wake(){
+  try {
+    if ('wakeLock' in navigator && !st.wl) {
+      st.wl = await navigator.wakeLock.request('screen');
+      st.wl.addEventListener('release', () => { st.wl = null; });
+    }
+  } catch(e) {}
+}
+// 画面が隠れるとタイマーが止まり、出力の制御ができなくなる。安全側に倒して止める
+document.addEventListener('visibilitychange', () => {
+  if (!st.connected) return;
+  if (document.hidden) emergency('画面が隠れたため緊急停止しました');
+  else wake();
+});
+
+function onDisc(){
+  clearInterval(st.timer); st.timer = null;
+  st.connected = false; st.chW = null; st.dev = null;
+  st.tA = st.tB = 0; st.aA = st.aB = null; st.pending = 0;
+  msg('切断されました');
+  render();
+}
+
+async function connect(){
+  if (!navigator.bluetooth) { msg('Web Bluetooth非対応です。AndroidのChromeでHTTPS経由で開いてください'); return; }
+  let dev = null;
+  try {
+    msg('デバイスを選択してください…');
+    dev = await navigator.bluetooth.requestDevice({
+      filters: [{namePrefix: '47L'}],
+      optionalServices: [SVC_MAIN, SVC_BATT]
+    });
+    dev.addEventListener('gattserverdisconnected', onDisc);
+    msg('接続中…');
+    const srv = await dev.gatt.connect();
+    const svc = await srv.getPrimaryService(SVC_MAIN);
+    st.chW = await svc.getCharacteristic(CH_WRITE);
+    const chN = await svc.getCharacteristic(CH_NOTIFY);
+    chN.addEventListener('characteristicvaluechanged', onNotify);
+    await chN.startNotifications();
+    try {
+      const sb = await srv.getPrimaryService(SVC_BATT);
+      const cb = await sb.getCharacteristic(CH_BATT);
+      st.batt = (await cb.readValue()).getUint8(0);
+      cb.addEventListener('characteristicvaluechanged', ev => { st.batt = ev.target.value.getUint8(0); render(); });
+      try { await cb.startNotifications(); } catch(e) {}
+    } catch(e) {}
+    st.dev = dev;
+    st.tA = st.tB = 0; st.aA = st.aB = null; st.pending = 0;   // 実強度は不明扱い → 最初のB0で0を明示的に送る
+    await sendBF();                          // 接続直後に必ず上限を設定
+    st.connected = true;
+    st.t0 = performance.now();
+    st.timer = setInterval(tick, 100);
+    wake();
+    msg('接続しました。強度は0から開始します');
+    render();
+  } catch(e) {
+    // 途中で失敗したら接続を残さない
+    try { dev && dev.gatt.connected && dev.gatt.disconnect(); } catch(_) {}
+    st.chW = null;
+    if (e && e.name === 'NotFoundError') msg('キャンセルされました');
+    else msg('接続エラー: ' + (e && e.message ? e.message : e));
+    render();
+  }
+}
+function disconnect(){
+  emergency();
+  setTimeout(() => { try { st.dev && st.dev.gatt.disconnect(); } catch(e) {} }, 250);
+}
+
+if ('serviceWorker' in navigator && location.protocol === 'https:') {
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+}
+
+render();
+})();
+</script>
+</body>
+</html>
