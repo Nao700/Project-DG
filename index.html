@@ -47,6 +47,7 @@
 </header>
 
 <button class="primary" id="connectBtn">接続（47L…を検索）</button>
+<button id="scanAllBtn" style="width:100%;margin-top:8px;min-height:40px;font-size:13px">見つからないとき：周辺の全デバイスを表示して接続</button>
 <div id="msg"></div>
 
 <div class="card ch A" id="chA"></div>
@@ -176,6 +177,7 @@ function render(){
   $('#status').textContent = st.connected ? '接続中' : '未接続';
   $('#batt').textContent = st.batt != null ? `🔋${st.batt}%` : '';
   $('#connectBtn').textContent = st.connected ? '切断' : '接続（47L…を検索）';
+  $('#scanAllBtn').style.display = st.connected ? 'none' : '';
 }
 function msg(t){ $('#msg').textContent = t || ''; }
 
@@ -191,7 +193,8 @@ document.addEventListener('click', e => {
 });
 for (const ch of ['A','B']) $('#sl'+ch).addEventListener('input', e => setTarget(ch, Number(e.target.value)));
 $('#stop').addEventListener('click', () => emergency());
-$('#connectBtn').addEventListener('click', () => st.connected ? disconnect() : connect());
+$('#connectBtn').addEventListener('click', () => st.connected ? disconnect() : connect(false));
+$('#scanAllBtn').addEventListener('click', () => { if (!st.connected) connect(true); });
 $('#applyBtn').addEventListener('click', async () => {
   st.lim.A = clampInt($('#limA').value, 200, st.lim.A);
   st.lim.B = clampInt($('#limB').value, 200, st.lim.B);
@@ -309,19 +312,29 @@ function onDisc(){
   render();
 }
 
-async function connect(){
+// 接続できないときの主な原因（メッセージに出す）
+const HINT = '公式アプリが接続中なら切断する（本体は同時に1台としかつながりません）／端末の位置情報をON／Chromeに「付近のデバイス」と位置情報の権限を許可、を確認してください';
+
+// all=true のときは名前で絞り込まず、周辺の全デバイスを一覧に出す（切り分け用）
+async function connect(all){
   if (!navigator.bluetooth) { msg('Web Bluetooth非対応です。AndroidのChromeでHTTPS経由で開いてください'); return; }
+  try {
+    if (navigator.bluetooth.getAvailability && !(await navigator.bluetooth.getAvailability())) {
+      msg('Bluetoothが使えません。端末のBluetoothをONにしてください'); return;
+    }
+  } catch(e) {}
   let dev = null;
   try {
     msg('デバイスを選択してください…');
-    dev = await navigator.bluetooth.requestDevice({
-      filters: [{namePrefix: '47L'}],
-      optionalServices: [SVC_MAIN, SVC_BATT]
-    });
+    dev = await navigator.bluetooth.requestDevice(all
+      ? {acceptAllDevices: true, optionalServices: [SVC_MAIN, SVC_BATT]}
+      : {filters: [{namePrefix: '47L'}], optionalServices: [SVC_MAIN, SVC_BATT]});
     dev.addEventListener('gattserverdisconnected', onDisc);
     msg('接続中…');
     const srv = await dev.gatt.connect();
-    const svc = await srv.getPrimaryService(SVC_MAIN);
+    let svc;
+    try { svc = await srv.getPrimaryService(SVC_MAIN); }
+    catch(e) { throw new Error(`「${dev.name || '名前なし'}」はCoyote 3.0ではないようです（制御用サービスがありません）`); }
     st.chW = await svc.getCharacteristic(CH_WRITE);
     const chN = await svc.getCharacteristic(CH_NOTIFY);
     chN.addEventListener('characteristicvaluechanged', onNotify);
@@ -340,14 +353,17 @@ async function connect(){
     st.t0 = performance.now();
     st.timer = setInterval(tick, 100);
     wake();
-    msg('接続しました。強度は0から開始します');
+    msg(`接続しました（${dev.name || '名前なし'}）。強度は0から開始します`);
     render();
   } catch(e) {
     // 途中で失敗したら接続を残さない
     try { dev && dev.gatt.connected && dev.gatt.disconnect(); } catch(_) {}
     st.chW = null;
-    if (e && e.name === 'NotFoundError') msg('キャンセルされました');
-    else msg('接続エラー: ' + (e && e.message ? e.message : e));
+    const m = e && e.message ? e.message : String(e);
+    if (e && e.name === 'NotFoundError' && /cancel/i.test(m)) msg('キャンセルされました。一覧に出ない場合は、' + HINT);
+    else if (e && e.name === 'NotFoundError') msg('デバイスが見つかりません。' + HINT);
+    else if (e && e.name === 'SecurityError') msg('権限がありません。' + HINT);
+    else msg('接続エラー: ' + m + '。' + HINT);
     render();
   }
 }
