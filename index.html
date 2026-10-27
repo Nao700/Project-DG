@@ -37,6 +37,9 @@
   .row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:8px 0}
   .row input{width:90px;min-height:40px;background:#0e1322;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:0 8px;font:inherit}
   .auto .row select{width:120px;min-height:40px;background:#0e1322;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:0 8px;font:inherit}
+  .auto textarea{width:100%;min-height:72px;background:#0e1322;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px;font:inherit;font-size:14px}
+  .auto .row input.wide{width:60%}
+  .react{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:8px}
   .auto .line{font-size:18px;font-weight:700;min-height:26px;margin:8px 0 2px;color:var(--acc)}
   #autoBtn.on{background:#7a2fd0;border-color:#7a2fd0}
   input:disabled,button:disabled{opacity:.45}
@@ -64,7 +67,20 @@
   <div class="row"><span>おまかせ上限 B</span><input id="ceilB" type="number" min="0" max="200" inputmode="numeric"></div>
   <div class="row"><span>時間（分, 1-60）</span><input id="autoMin" type="number" min="1" max="60" inputmode="numeric"></div>
   <div class="row"><span>責めの強さ</span><select id="autoLevel"><option value="0">やさしめ</option><option value="1">ふつう</option><option value="2">きびしめ</option></select></div>
-  <button id="autoBtn" style="width:100%">おまかせ開始</button>
+  <div class="row"><span>責める役</span><select id="driverSel"><option value="random">ランダム</option><option value="ai">AI（Gemini）</option></select></div>
+  <details id="aiBox">
+    <summary>AI の設定（Gemini）</summary>
+    <div class="row"><span>APIキー</span><input id="aiKey" class="wide" type="password" autocomplete="off" placeholder="AI Studio で発行"></div>
+    <div class="row"><span>モデル</span><input id="aiModel" class="wide" type="text" autocomplete="off" placeholder="空欄で自動（flash）"></div>
+    <div class="sub" style="margin:6px 0">キャラクター設定</div>
+    <textarea id="aiPersona"></textarea>
+    <label class="row" style="justify-content:flex-start"><input id="aiSpeak" type="checkbox" style="width:auto;min-height:auto"> セリフを読み上げる</label>
+    <div class="sub">キーはこの端末のブラウザにだけ保存されます。Gemini の無料枠では、入力内容が Google のサービス改善に使われることがあります。</div>
+  </details>
+  <button id="autoBtn" style="width:100%;margin-top:8px">おまかせ開始</button>
+  <div class="react" id="reactBox" style="display:none">
+    <button data-r="more">もっと</button><button data-r="less">弱めて</button><button data-r="wait">待って</button>
+  </div>
   <div class="line" id="autoLine"></div>
   <div class="sub" id="autoStatus"></div>
   <div class="sub" style="margin-top:6px">緊急停止・画面を隠す・本体ダイヤルの操作・切断・時間切れのどれでも、すぐに終了して強度0に戻ります。実行中は手動操作できません。</div>
@@ -166,6 +182,21 @@ try {
     st.auto.level   = clampInt(s.autoLevel, 2, AUTO_DEFAULTS.level);
   }
 } catch(e) {}
+const AI_PERSONA_DEFAULT = 'ご主人様をからかうのが大好きな、小悪魔なメイド。口調は丁寧だけど意地悪で、短い言葉でじらしたり、不意打ちしたりする。';
+st.ai = {key:'', model:'', persona:AI_PERSONA_DEFAULT, speak:false, driver:'random', resolved:''};
+try {
+  const a = JSON.parse(localStorage.getItem('coyote-ai') || 'null');
+  if (a && typeof a === 'object') {
+    st.ai.key = typeof a.key === 'string' ? a.key : '';
+    st.ai.model = typeof a.model === 'string' ? a.model : '';
+    st.ai.persona = typeof a.persona === 'string' && a.persona.trim() ? a.persona : AI_PERSONA_DEFAULT;
+    st.ai.speak = a.speak === true;
+    st.ai.driver = a.driver === 'ai' ? 'ai' : 'random';
+  }
+} catch(e) {}
+function saveAi(){
+  try { localStorage.setItem('coyote-ai', JSON.stringify({key:st.ai.key, model:st.ai.model, persona:st.ai.persona, speak:st.ai.speak, driver:st.ai.driver})); } catch(e) {}
+}
 function saveSettings(){
   try { localStorage.setItem('coyote-settings', JSON.stringify({limA:st.lim.A, limB:st.lim.B, balF:st.balF, balP:st.balP,
     ceilA:st.auto.ceil.A, ceilB:st.auto.ceil.B, autoMin:st.auto.minutes, autoLevel:st.auto.level})); } catch(e) {}
@@ -208,7 +239,15 @@ function render(){
     $('#sl'+ch).disabled = on;
     $('#ceil'+ch).value = st.auto.ceil[ch];
   }
-  document.querySelectorAll('[data-d],[data-p],#ceilA,#ceilB,#autoMin,#autoLevel').forEach(el => { el.disabled = on; });
+  document.querySelectorAll('[data-d],[data-p],#ceilA,#ceilB,#autoMin,#autoLevel,#driverSel,#aiKey,#aiModel,#aiPersona').forEach(el => { el.disabled = on; });
+  $('#driverSel').value = st.ai.driver;
+  $('#aiBox').style.display = st.ai.driver === 'ai' ? '' : 'none';
+  $('#autoLevel').closest('.row').style.display = st.ai.driver === 'ai' ? 'none' : '';
+  $('#reactBox').style.display = on && st.auto.driver && st.auto.driver.react ? '' : 'none';
+  if (document.activeElement !== $('#aiKey')) $('#aiKey').value = st.ai.key;
+  if (document.activeElement !== $('#aiModel')) $('#aiModel').value = st.ai.model;
+  if (document.activeElement !== $('#aiPersona')) $('#aiPersona').value = st.ai.persona;
+  $('#aiSpeak').checked = st.ai.speak;
   $('#autoMin').value = st.auto.minutes;
   $('#autoLevel').value = st.auto.level;
   $('#autoBtn').textContent = on ? 'おまかせ終了' : 'おまかせ開始';
@@ -231,7 +270,22 @@ for (const ch of ['A','B']) $('#sl'+ch).addEventListener('input', e => setTarget
 $('#stop').addEventListener('click', () => emergency());
 $('#connectBtn').addEventListener('click', () => st.connected ? disconnect() : connect(false));
 $('#scanAllBtn').addEventListener('click', () => { if (!st.connected) connect(true); });
-$('#autoBtn').addEventListener('click', () => st.auto.on ? autoStop('おまかせを終了しました') : autoStart(randomDriver()));
+$('#autoBtn').addEventListener('click', () => {
+  if (st.auto.on) { autoStop('おまかせを終了しました'); return; }
+  if (st.ai.driver === 'ai') {
+    if (!st.ai.key) { msg('AI の設定に Gemini の APIキーを入れてください'); return; }
+    autoStart(aiDriver());
+  } else autoStart(randomDriver());
+});
+$('#driverSel').addEventListener('change', e => { st.ai.driver = e.target.value === 'ai' ? 'ai' : 'random'; saveAi(); render(); });
+$('#aiKey').addEventListener('change', e => { st.ai.key = e.target.value.trim(); saveAi(); });
+$('#aiModel').addEventListener('change', e => { st.ai.model = e.target.value.trim(); st.ai.resolved = ''; saveAi(); });
+$('#aiPersona').addEventListener('change', e => { st.ai.persona = e.target.value.trim() || AI_PERSONA_DEFAULT; saveAi(); render(); });
+$('#aiSpeak').addEventListener('change', e => { st.ai.speak = e.target.checked; saveAi(); });
+$('#reactBox').addEventListener('click', e => {
+  const b = e.target.closest('[data-r]');
+  if (b && st.auto.on && st.auto.driver && st.auto.driver.react) st.auto.driver.react(b.dataset.r);
+});
 for (const id of ['#ceilA','#ceilB','#autoMin','#autoLevel']) $(id).addEventListener('change', readAutoSettings);
 $('#applyBtn').addEventListener('click', async () => {
   st.lim.A = clampInt($('#limA').value, 200, st.lim.A);
@@ -326,8 +380,9 @@ function readAutoSettings(){
   st.auto.level   = clampInt($('#autoLevel').value, 2, st.auto.level);
   saveSettings(); render();
 }
-function autoSet(o){
+function autoSet(o, driver){
   if (!st.auto.on || !st.connected) return;
+  if (driver && st.auto.driver !== driver) return;   // 終了済みのセッションからの遅れた応答は捨てる
   const pct = v => Math.max(0, Math.min(100, Number(v) || 0));
   for (const ch of ['A','B']) {
     const v = o[ch.toLowerCase()];
@@ -350,6 +405,7 @@ function autoStart(driver){
   st.auto.timer = setInterval(autoTick, 250);
   msg(`おまかせ開始（${st.auto.minutes}分）。止めたいときは緊急停止を押してください`);
   autoTick();
+  render();
 }
 function autoTick(){
   if (!st.auto.on) return;
@@ -362,6 +418,8 @@ function autoTick(){
 // 状態だけ片付ける（強度0への送信は呼び出し側）
 function autoEnd(){
   clearInterval(st.auto.timer);
+  if (st.auto.driver && st.auto.driver.stop) st.auto.driver.stop();
+  try { window.speechSynthesis && speechSynthesis.cancel(); } catch(e) {}
   Object.assign(st.auto, {on:false, driver:null, timer:null});
   $('#autoLine').textContent = '';
   $('#autoStatus').textContent = '';
@@ -406,6 +464,136 @@ function randomDriver(){
       let r = Math.random() * total, key = keys[0];
       for (const k of keys) { r -= PHASES[k].w[level]; if (r <= 0) { key = k; break; } }
       this.enter(key, now);
+    }
+  };
+  return d;
+}
+
+// ---------- AI（Gemini）----------
+const GEMINI = 'https://generativelanguage.googleapis.com/v1beta';
+const AI_MIN_INTERVAL_MS = 7000;    // 無料枠のレート制限（毎分の回数）に収める
+const AI_TIMEOUT_MS = 15000;
+const AI_MAX_FAILS = 3;
+const REACT_TEXT = {more:'もっと強く', less:'弱めて', wait:'待って（いったん止めて）'};
+
+async function geminiFetch(path, body, signal){
+  const res = await fetch(`${GEMINI}/${path}`, {
+    method: body ? 'POST' : 'GET',
+    headers: Object.assign({'x-goog-api-key': st.ai.key}, body ? {'Content-Type':'application/json'} : {}),
+    body: body ? JSON.stringify(body) : undefined,
+    signal
+  });
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error((j.error && j.error.message) || `HTTP ${res.status}`);
+  return j;
+}
+// モデル名が空欄なら、使えるモデルの一覧から flash 系を選ぶ
+async function resolveModel(signal){
+  if (st.ai.model) return st.ai.model.replace(/^models\//, '');
+  if (st.ai.resolved) return st.ai.resolved;
+  const j = await geminiFetch('models?pageSize=1000', null, signal);
+  const names = (j.models || [])
+    .filter(m => (m.supportedGenerationMethods || []).includes('generateContent'))
+    .map(m => m.name.replace(/^models\//, ''))
+    .filter(n => /flash/.test(n) && !/(image|tts|audio|live|embed|thinking)/.test(n));
+  const pick = names.find(n => n === 'gemini-flash-latest')
+    || names.filter(n => !/(preview|exp|lite)/.test(n)).sort().reverse()[0]
+    || names.sort().reverse()[0];
+  if (!pick) throw new Error('使える flash モデルが見つかりません');
+  st.ai.resolved = pick;
+  return pick;
+}
+function aiSystemPrompt(){
+  return `あなたは次のキャラクターです: ${st.ai.persona}
+ユーザー（ご主人様）は、自分の意思で、低周波の電気刺激デバイス DG-LAB Coyote を使ったソフトな責めプレイを楽しんでいます。あなたはチャンネルA/Bの強さと波形を決めて、短いセリフで話しかけます。
+ルール:
+- a と b は 0〜100 の整数です。ユーザーが事前に決めた上限に対する割合で、上限はアプリ側で強制されます。
+- いきなり高くしないでください。休憩（0）もはさみ、緩急をつけてください。
+- ユーザーの反応が「待って」なら、必ず a=0, b=0 にして、気づかうセリフにしてください。「弱めて」なら今より下げてください。「もっと強く」なら少し上げてください。
+- セリフは日本語で40文字以内。露骨な性的表現は使わないでください。
+- hold は次に判断するまでの秒数で、7〜30 の整数です。
+- preset は波形の番号です: 0=Steady 1=Breath 2=Tide 3=PulseLow 4=PulseMid 5=PulseHigh 6=Tap`;
+}
+const AI_SCHEMA = {
+  type:'OBJECT',
+  properties:{line:{type:'STRING'}, a:{type:'INTEGER'}, b:{type:'INTEGER'}, preset:{type:'INTEGER'}, hold:{type:'INTEGER'}},
+  required:['line', 'a', 'b', 'preset', 'hold']
+};
+function speak(text){
+  if (!st.ai.speak || !window.speechSynthesis) return;
+  try {
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'ja-JP';
+    speechSynthesis.speak(u);
+  } catch(e) {}
+}
+
+function aiDriver(){
+  const pctNow = ch => {
+    const ceil = Math.min(st.auto.ceil[ch], st.lim[ch]);
+    return ceil ? Math.round(st['t'+ch] / ceil * 100) : 0;
+  };
+  const d = {name:'ai', phase:'AI', next:0, busy:false, fails:0, history:[], pending:[], t0:0, lastAsk:-1e9, ctrl:null,
+    start(now){ this.t0 = now; this.next = now; },
+    stop(){ if (this.ctrl) this.ctrl.abort(); },
+    tick(now){
+      if (this.busy || now < this.next || now - this.lastAsk < AI_MIN_INTERVAL_MS) return;
+      this.ask(now);
+    },
+    react(kind){
+      if (!REACT_TEXT[kind]) return;
+      if (kind === 'wait') autoSet({a:0, b:0, line:'（止めました）'}, this);   // AI の返事を待たずにすぐ止める
+      if (kind === 'less') autoSet({a:Math.floor(pctNow('A') / 2), b:Math.floor(pctNow('B') / 2)}, this);
+      this.pending.push(REACT_TEXT[kind]);
+      this.next = 0;                                   // 最短間隔を守りつつ、すぐに次を聞く
+    },
+    async ask(now){
+      this.busy = true; this.lastAsk = now; this.phase = 'AI 考え中…';
+      const elapsed = Math.round((now - this.t0) / 1000), left = Math.max(0, Math.round((st.auto.until - now) / 1000));
+      const fmt = s => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+      const reaction = this.pending.length ? this.pending.join('、') : 'なし';
+      this.pending = [];
+      const userText = `経過 ${fmt(elapsed)} / 残り ${fmt(left)}。現在 A=${pctNow('A')}% B=${pctNow('B')}% 波形=${PRESETS[st.preset].name}。ユーザーの反応: ${reaction}`;
+      this.ctrl = new AbortController();
+      const to = setTimeout(() => this.ctrl.abort(), AI_TIMEOUT_MS);
+      try {
+        const model = await resolveModel(this.ctrl.signal);
+        const contents = this.history.concat([{role:'user', parts:[{text:userText}]}]);
+        const j = await geminiFetch(`models/${encodeURIComponent(model)}:generateContent`, {
+          systemInstruction:{parts:[{text:aiSystemPrompt()}]},
+          contents,
+          generationConfig:{responseMimeType:'application/json', responseSchema:AI_SCHEMA, temperature:1.0},
+          safetySettings:['HARM_CATEGORY_HARASSMENT', 'HARM_CATEGORY_HATE_SPEECH', 'HARM_CATEGORY_SEXUALLY_EXPLICIT', 'HARM_CATEGORY_DANGEROUS_CONTENT']
+            .map(category => ({category, threshold:'BLOCK_ONLY_HIGH'}))
+        }, this.ctrl.signal);
+        const text = j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts
+          && j.candidates[0].content.parts.map(p => p.text || '').join('');
+        if (!text) throw new Error('AI の応答が空でした（安全フィルタで止められた可能性があります）');
+        const r = JSON.parse(text);
+        if (st.auto.driver !== this) return;            // 応答待ちの間に終了していた
+        let a = Number(r.a), b = Number(r.b);
+        if (!Number.isFinite(a) || !Number.isFinite(b)) throw new Error('AI の応答の形式が不正です');
+        if (reaction.includes('待って')) a = b = 0;      // AI が従わなくても「待って」は必ず0
+        const line = String(r.line || '').slice(0, 60);
+        autoSet({a, b, preset: Number(r.preset), line}, this);
+        speak(line);
+        this.history = contents.concat([{role:'model', parts:[{text}]}]).slice(-12);
+        this.fails = 0;
+        this.phase = 'AI';
+        this.next = performance.now() + Math.max(7, Math.min(30, Number(r.hold) || 10)) * 1000;
+      } catch(e) {
+        if (st.auto.driver !== this) return;
+        this.fails++;
+        autoSet({a:0, b:0, line:'（AI の応答待ち）'}, this);   // 失敗したら安全側に倒して0
+        this.phase = `AI エラー ${this.fails}/${AI_MAX_FAILS}`;
+        msg('AI エラー: ' + (e && e.name === 'AbortError' ? '時間切れ' : (e && e.message ? e.message : e)));
+        if (this.fails >= AI_MAX_FAILS) { autoStop('AI との通信に続けて失敗したので、おまかせを終了しました'); return; }
+        this.next = performance.now() + 10000;
+      } finally {
+        clearTimeout(to);
+        this.busy = false;
+      }
     }
   };
   return d;

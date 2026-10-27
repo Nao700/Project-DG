@@ -1,6 +1,6 @@
 // オフラインでも開けるようにアプリ本体をキャッシュする。
 // ファイルを更新したら VERSION を上げること（古いキャッシュが消える）
-const VERSION = 'coyote-v3';
+const VERSION = 'coyote-v4';
 const FILES = ['./', './index.html', './manifest.webmanifest', './icon.svg', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {
@@ -13,7 +13,8 @@ self.addEventListener('activate', e => {
 });
 // ネットワーク優先。つながらないときだけキャッシュを使う（更新がすぐ反映されるように）
 self.addEventListener('fetch', e => {
-  if (e.request.method !== 'GET') return;
+  // 自分のサイトのファイルだけ扱う（AI の API などはキャッシュしない）
+  if (e.request.method !== 'GET' || new URL(e.request.url).origin !== self.location.origin) return;
   e.respondWith(
     fetch(e.request)
       .then(res => {
