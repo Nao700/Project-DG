@@ -31,7 +31,8 @@
   .steps{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:8px 0}
   input[type=range]{width:100%;height:44px;accent-color:var(--a)}
   .B input[type=range]{accent-color:var(--b)}
-  .presets{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+  .presets{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+  .presets button{padding:10px 4px;font-size:13px}
   .presets button.sel{background:var(--acc);color:#111;border-color:var(--acc);font-weight:700}
   details summary{min-height:44px;display:flex;align-items:center;cursor:pointer}
   .row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:8px 0}
@@ -139,15 +140,39 @@ const B1_TIMEOUT_MS = 600;    // B1 の応答を待つ時間。過ぎたら再�
 // 低い周波数（数Hz）は1発ずつの「ドンッ」という鈍い衝撃になって痛みやすいため、リズムは強度の変化だけで作る。
 // shape: 'sine'（なめらかに上下）| 'pulse'（台形。立ち上がり・立ち下がりをなだらかにする）
 // sMin/sMax: 強度エンベロープ(0-100%) / sCycle: その周期(ms) / fMod: 周波数を ±何割ゆらすか / fCycle: その周期
+// shape: 'seq' は 100ms ごとの強度(%)の並び。間は直線でつなぐ（角をなだらかにする）。最後まで行くと先頭に戻る
+//   fSeq を付けると、同じく 100ms ごとにパルス周波数を何倍にするか（0.7〜1.4 の範囲。下限は設定の最小Hz）
+// 番号 0〜6 は AI の指示やランダムモードが使うので、並びを変えずに後ろへ足していく
+const Z = n => Array(n).fill(0);                                  // n 個の 0（休み）
+const RAMP = (a, b, n) => Array.from({length:n}, (_, i) => Math.round(a + (b - a) * (i + 1) / n));
+const REP = (arr, n) => Array.from({length:n}, () => arr).flat();
 const PRESETS = [
-  {name:'Steady',    shape:'sine',  sMin:100, sMax:100, sCycle:1000, fMod:0},
-  {name:'Breath',    shape:'sine',  sMin:20,  sMax:80,  sCycle:4000, fMod:0},
-  {name:'Tide',      shape:'sine',  sMin:10,  sMax:90,  sCycle:3000, fMod:0.3, fCycle:6000},
-  {name:'PulseLow',  shape:'pulse', sMin:10,  sMax:45,  sCycle:1600, fMod:0},
-  {name:'PulseMid',  shape:'pulse', sMin:10,  sMax:55,  sCycle:1000, fMod:0},
-  {name:'PulseHigh', shape:'pulse', sMin:10,  sMax:65,  sCycle:500,  fMod:0},
-  {name:'Tap',       shape:'pulse', sMin:0,   sMax:70,  sCycle:400,  fMod:0},
+  {name:'Steady',    label:'一定',       shape:'sine',  sMin:100, sMax:100, sCycle:1000, fMod:0},
+  {name:'Breath',    label:'呼吸',       shape:'sine',  sMin:20,  sMax:80,  sCycle:4000, fMod:0},
+  {name:'Tide',      label:'潮の満ち引き', shape:'sine',  sMin:10,  sMax:90,  sCycle:3000, fMod:0.3, fCycle:6000},
+  {name:'PulseLow',  label:'ゆっくりパルス', shape:'pulse', sMin:10,  sMax:45,  sCycle:1600, fMod:0},
+  {name:'PulseMid',  label:'パルス',     shape:'pulse', sMin:10,  sMax:55,  sCycle:1000, fMod:0},
+  {name:'PulseHigh', label:'速いパルス',  shape:'pulse', sMin:10,  sMax:65,  sCycle:500,  fMod:0},
+  {name:'Tap',       label:'タップ',     shape:'pulse', sMin:0,   sMax:70,  sCycle:400,  fMod:0},
+  // ここから 100ms 刻みのパターン
+  {name:'Heartbeat', label:'心拍',       shape:'seq', seq:[0, 60, 25, 85, 30, 0, ...Z(6)]},
+  {name:'Combo',     label:'連打',       shape:'seq', seq:[...REP([80, 0], 3), ...Z(6)]},
+  {name:'Knead',     label:'もみもみ',    shape:'seq', seq:[20, 55, 90, 55, 20, 5]},
+  {name:'KneadUp',   label:'もみ・だんだん強く', shape:'seq',
+     seq:[30, 45, 60, 75, 90, 100].flatMap(m => [m * 0.2, m * 0.6, m, m * 0.6, m * 0.2, 0].map(Math.round)).concat(Z(5))},
+  {name:'Squeeze',   label:'しめつけ',    shape:'seq',
+     seq:[...RAMP(10, 100, 20), 100, 100, 100, ...RAMP(100, 10, 5), ...Z(5)], fSeq:[...RAMP(80, 130, 20).map(x => x / 100), 1.3, 1.3, 1.3, ...RAMP(130, 100, 5).map(x => x / 100), ...Array(5).fill(1)]},
+  {name:'Stairs',    label:'階段',       shape:'seq', seq:[...REP([25], 4), ...REP([50], 4), ...REP([75], 4), ...REP([100], 4), ...Z(6)]},
+  {name:'Grain',     label:'ざらざら',    shape:'seq', seq:[70, 55, 80, 60, 75, 50, 85, 60], fSeq:[1.3, 0.75, 1.2, 0.8, 1.4, 0.7, 1.1, 0.85]},
+  {name:'Bounce',    label:'バウンド',    shape:'seq', seq:[100, 0, 0, 0, 70, 0, 0, 45, 0, 25, 0, 10, ...Z(8)]},
+  {name:'Ripple',    label:'波紋',       shape:'seq', seq:[0, 30, 0, 50, 10, 70, 20, 90, 30, 100, 40, 80, 30, 60, 20, 40, 10, 20, ...Z(4)]},
+  {name:'Rain',      label:'雨だれ',     shape:'seq', seq:[60, 0, 0, 80, 0, 50, 0, 0, 0, 90, 0, 40, 0, 0, 70, 0, 0, 0, 55, 0, 85, 0, 0, 0]},
+  {name:'Signal',    label:'信号',       shape:'seq', seq:[...REP([80], 5), ...Z(3), 80, 0, 80, ...Z(6)]},
+  {name:'Tease',     label:'じらし→不意打ち', shape:'seq', seq:[...REP([15, 20, 25, 20], 6), 95, 95, ...Z(8)]},
+  {name:'Accel',     label:'加速',       shape:'seq',
+     seq:[...REP([70, 0, 0, 0, 0], 3), ...REP([70, 0, 0, 0], 3), ...REP([70, 0, 0], 4), ...REP([70, 0], 6), ...Z(10)]},
 ];
+const SEQ_MS = 100;
 
 // 周期(ms) → V3の周波数入力値(10-240)。10-100はそのまま、101-600は(x-100)/5+100、601-1000は(x-600)/10+200
 function periodToRaw(ms){
@@ -158,7 +183,15 @@ function periodToRaw(ms){
 // t(ms) における（周波数の入力値, 強度0-100）を返す。hz は設定のパルス周波数
 function sample(p, t, hz){
   let f = hz;
-  if (p.fMod) f = hz * (1 + p.fMod * Math.sin(2 * Math.PI * ((t % p.fCycle) / p.fCycle)));
+  if (p.shape === 'seq') {
+    const n = p.seq.length, x = (t % (n * SEQ_MS)) / SEQ_MS, i = Math.floor(x), w = x - i;
+    const at = (arr, j) => arr[j % n];
+    const pct = at(p.seq, i) + (at(p.seq, i + 1) - at(p.seq, i)) * w;
+    if (p.fSeq) f = hz * Math.max(0.7, Math.min(1.4, at(p.fSeq, i) + (at(p.fSeq, i + 1) - at(p.fSeq, i)) * w));
+    f = Math.max(f, PULSE_HZ_MIN);   // 低すぎる周波数は痛いので、設定の最小より下げない
+    return {f: periodToRaw(1000 / f), s: Math.max(0, Math.min(100, Math.round(pct)))};
+  }
+  if (p.fMod) f = Math.max(PULSE_HZ_MIN, hz * (1 + p.fMod * Math.sin(2 * Math.PI * ((t % p.fCycle) / p.fCycle))));
   const ph = (t % p.sCycle) / p.sCycle;
   let k;                                                 // 0..1
   if (p.shape === 'sine') {
@@ -236,7 +269,7 @@ function buildChannel(el, ch){
 }
 buildChannel($('#chA'), 'A');
 buildChannel($('#chB'), 'B');
-$('#presets').innerHTML = PRESETS.map((p, i) => `<button data-p="${i}">${p.name}</button>`).join('');
+$('#presets').innerHTML = PRESETS.map((p, i) => `<button data-p="${i}">${p.label}</button>`).join('');
 
 function render(){
   for (const ch of ['A','B']) {
@@ -488,7 +521,7 @@ function randomDriver(){
   const pick = a => a[Math.floor(Math.random() * a.length)];
   const level = st.auto.level;
   const scale = [0.6, 0.8, 1.0][level];
-  const PULSES = [3, 4, 5, 6], WAVES = [1, 2];   // PRESETS の番号
+  const PULSES = [3, 4, 5, 6, 7, 8, 9, 13, 14, 16, 17, 19], WAVES = [1, 2, 10, 11, 12, 15];   // PRESETS の番号
   const PHASES = {
     rest:  {name:'休憩',   w:[4, 3, 2],     sec:[4, 12],  pct:[0, 0],    lines:['少し休ませてあげる', 'まだ終わりじゃないよ', '油断しないでね']},
     tease: {name:'じらし', w:[4, 4, 3],     sec:[6, 20],  pct:[15, 45],  lines:['少しずつね', 'じわじわいくよ', 'これくらいはまだ平気でしょ？']},
@@ -569,6 +602,7 @@ async function resolveModels(signal){
   st.ai.resolved = list;
   return list;
 }
+const presetList = () => PRESETS.map((p, i) => `${i}=${p.label}`).join(' ');
 function aiSystemPrompt(){
   return `あなたは次のキャラクターです: ${st.ai.persona}
 ユーザー（ご主人様）は、自分の意思で、低周波の電気刺激デバイス DG-LAB Coyote を使ったソフトな責めプレイを楽しんでいます。あなたはチャンネルA/Bの強さと波形を決めて、短いセリフで話しかけます。
@@ -578,7 +612,7 @@ function aiSystemPrompt(){
 - ユーザーの反応が「待って」なら、必ず a=0, b=0 にして、気づかうセリフにしてください。「弱めて」なら今より下げてください。「もっと強く」なら少し上げてください。
 - セリフは日本語で40文字以内。露骨な性的表現は使わないでください。
 - hold は次に判断するまでの秒数で、7〜30 の整数です。
-- preset は波形の番号です: 0=Steady 1=Breath 2=Tide 3=PulseLow 4=PulseMid 5=PulseHigh 6=Tap`;
+- preset は波形の番号です: ${presetList()}`;
 }
 const AI_SCHEMA = {
   type:'OBJECT',
@@ -616,7 +650,7 @@ function aiDriver(backend){
       const fmt = s => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
       const reaction = this.pending.length ? this.pending.join('、') : 'なし';
       this.pending = [];
-      const userText = `経過 ${fmt(elapsed)} / 残り ${fmt(left)}。現在 A=${pctNow('A')}% B=${pctNow('B')}% 波形=${PRESETS[st.preset].name}。ユーザーの反応: ${reaction}`;
+      const userText = `経過 ${fmt(elapsed)} / 残り ${fmt(left)}。現在 A=${pctNow('A')}% B=${pctNow('B')}% 波形=${PRESETS[st.preset].label}。ユーザーの反応: ${reaction}`;
       let to = null;
       try {
         if (backend.prepare) {                       // モデルの読み込みなど（時間制限なし。その間の強度は0）
@@ -798,7 +832,7 @@ function localSystemPrompt(){
 毎回、次の形式の1行だけで答えてください。説明は書かないでください。
 A,B,波形,秒数|セリフ
 - A と B: チャンネルの強さ。0〜100 の整数（上限に対する割合）
-- 波形: 0〜6 の番号（0=一定 1=呼吸 2=潮 3=ゆっくりパルス 4=パルス 5=速いパルス 6=タップ）
+- 波形: 0〜${PRESETS.length - 1} の番号（${presetList()}）
 - 秒数: 次に決めるまでの秒数。7〜30
 - 休憩（0,0）もはさんで緩急をつけ、いきなり100にしない
 - ユーザーが「待って」と言ったら必ず 0,0 にする。「弱めて」なら下げる。「もっと強く」なら少し上げる
