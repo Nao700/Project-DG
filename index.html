@@ -36,6 +36,10 @@
   details summary{min-height:44px;display:flex;align-items:center;cursor:pointer}
   .row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:8px 0}
   .row input{width:90px;min-height:40px;background:#0e1322;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:0 8px;font:inherit}
+  .auto .row select{width:120px;min-height:40px;background:#0e1322;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:0 8px;font:inherit}
+  .auto .line{font-size:18px;font-weight:700;min-height:26px;margin:8px 0 2px;color:var(--acc)}
+  #autoBtn.on{background:#7a2fd0;border-color:#7a2fd0}
+  input:disabled,button:disabled{opacity:.45}
   #msg{font-size:13px;color:var(--dim);min-height:18px;margin:6px 2px}
   #stop{position:fixed;left:12px;right:12px;bottom:12px;max-width:536px;margin:0 auto;min-height:72px;background:var(--stop);border-color:#ff6a6e;font-size:22px;font-weight:800;letter-spacing:2px;border-radius:16px;z-index:9}
 </style>
@@ -52,6 +56,19 @@
 
 <div class="card ch A" id="chA"></div>
 <div class="card ch B" id="chB"></div>
+
+<div class="card auto">
+  <div class="name" style="font-weight:700">おまかせ責めモード</div>
+  <div class="sub">アプリが予測できないタイミングと強さで責めます。強度は下の「おまかせ上限」までしか上がりません。</div>
+  <div class="row"><span>おまかせ上限 A</span><input id="ceilA" type="number" min="0" max="200" inputmode="numeric"></div>
+  <div class="row"><span>おまかせ上限 B</span><input id="ceilB" type="number" min="0" max="200" inputmode="numeric"></div>
+  <div class="row"><span>時間（分, 1-60）</span><input id="autoMin" type="number" min="1" max="60" inputmode="numeric"></div>
+  <div class="row"><span>責めの強さ</span><select id="autoLevel"><option value="0">やさしめ</option><option value="1">ふつう</option><option value="2">きびしめ</option></select></div>
+  <button id="autoBtn" style="width:100%">おまかせ開始</button>
+  <div class="line" id="autoLine"></div>
+  <div class="sub" id="autoStatus"></div>
+  <div class="sub" style="margin-top:6px">緊急停止・画面を隠す・本体ダイヤルの操作・切断・時間切れのどれでも、すぐに終了して強度0に戻ります。実行中は手動操作できません。</div>
+</div>
 
 <div class="card">
   <div class="sub" style="margin-bottom:8px">波形プリセット（A/B共通）</div>
@@ -81,6 +98,7 @@ const SVC_BATT = 0x180a, CH_BATT = 0x1500;
 
 // ---------- 安全設定 ----------
 const DEFAULTS = {limA:60, limB:60, balF:160, balP:0};   // バランス値は仮置き（公式推奨値は未確認）
+const AUTO_DEFAULTS = {ceilA:20, ceilB:20, minutes:10, level:1};
 const MAX_STEP_UP = 5;        // 強度を上げるときの1回あたりの上限（下げるときは一気に）
 const B1_TIMEOUT_MS = 600;    // B1 の応答を待つ時間。過ぎたら再送する
 
@@ -124,7 +142,9 @@ const st = {
   tA:0, tB:0, aA:null, aB:null,     // 目標 / 本体から通知された実強度（null は不明）
   seq:0, pending:0, pendingAt:0,
   preset:0, t0:performance.now(), timer:null, qd:0, queue:Promise.resolve(),
-  lim:{A:DEFAULTS.limA, B:DEFAULTS.limB}, balF:DEFAULTS.balF, balP:DEFAULTS.balP, batt:null, wl:null
+  lim:{A:DEFAULTS.limA, B:DEFAULTS.limB}, balF:DEFAULTS.balF, balP:DEFAULTS.balP, batt:null, wl:null,
+  // おまかせ: ceil は操作役が上げられる上限（ソフトリミット以下に丸める）
+  auto:{on:false, driver:null, until:0, timer:null, ceil:{A:AUTO_DEFAULTS.ceilA, B:AUTO_DEFAULTS.ceilB}, minutes:AUTO_DEFAULTS.minutes, level:AUTO_DEFAULTS.level}
 };
 
 // 整数に丸めて範囲内に収める。数値でなければ既定値
@@ -140,10 +160,15 @@ try {
     st.lim.B = clampInt(s.limB, 200, DEFAULTS.limB);
     st.balF  = clampInt(s.balF, 255, DEFAULTS.balF);
     st.balP  = clampInt(s.balP, 255, DEFAULTS.balP);
+    st.auto.ceil.A  = clampInt(s.ceilA, 200, AUTO_DEFAULTS.ceilA);
+    st.auto.ceil.B  = clampInt(s.ceilB, 200, AUTO_DEFAULTS.ceilB);
+    st.auto.minutes = Math.max(1, clampInt(s.autoMin, 60, AUTO_DEFAULTS.minutes));
+    st.auto.level   = clampInt(s.autoLevel, 2, AUTO_DEFAULTS.level);
   }
 } catch(e) {}
 function saveSettings(){
-  try { localStorage.setItem('coyote-settings', JSON.stringify({limA:st.lim.A, limB:st.lim.B, balF:st.balF, balP:st.balP})); } catch(e) {}
+  try { localStorage.setItem('coyote-settings', JSON.stringify({limA:st.lim.A, limB:st.lim.B, balF:st.balF, balP:st.balP,
+    ceilA:st.auto.ceil.A, ceilB:st.auto.ceil.B, autoMin:st.auto.minutes, autoLevel:st.auto.level})); } catch(e) {}
 }
 
 // ---------- UI ----------
@@ -178,10 +203,21 @@ function render(){
   $('#batt').textContent = st.batt != null ? `🔋${st.batt}%` : '';
   $('#connectBtn').textContent = st.connected ? '切断' : '接続（47L…を検索）';
   $('#scanAllBtn').style.display = st.connected ? 'none' : '';
+  const on = st.auto.on;
+  for (const ch of ['A','B']) {
+    $('#sl'+ch).disabled = on;
+    $('#ceil'+ch).value = st.auto.ceil[ch];
+  }
+  document.querySelectorAll('[data-d],[data-p],#ceilA,#ceilB,#autoMin,#autoLevel').forEach(el => { el.disabled = on; });
+  $('#autoMin').value = st.auto.minutes;
+  $('#autoLevel').value = st.auto.level;
+  $('#autoBtn').textContent = on ? 'おまかせ終了' : 'おまかせ開始';
+  $('#autoBtn').classList.toggle('on', on);
 }
 function msg(t){ $('#msg').textContent = t || ''; }
 
 function setTarget(ch, v){
+  if (st.auto.on) { render(); return; }   // おまかせ中は手動操作しない
   st['t'+ch] = Math.max(0, Math.min(st.lim[ch], Math.round(v)));
   render();
 }
@@ -189,17 +225,21 @@ function setTarget(ch, v){
 document.addEventListener('click', e => {
   const b = e.target.closest('button'); if (!b) return;
   if (b.dataset.d) setTarget(b.dataset.ch, st['t'+b.dataset.ch] + Number(b.dataset.d));
-  if (b.dataset.p) { st.preset = Number(b.dataset.p); render(); }
+  if (b.dataset.p && !st.auto.on) { st.preset = Number(b.dataset.p); render(); }
 });
 for (const ch of ['A','B']) $('#sl'+ch).addEventListener('input', e => setTarget(ch, Number(e.target.value)));
 $('#stop').addEventListener('click', () => emergency());
 $('#connectBtn').addEventListener('click', () => st.connected ? disconnect() : connect(false));
 $('#scanAllBtn').addEventListener('click', () => { if (!st.connected) connect(true); });
+$('#autoBtn').addEventListener('click', () => st.auto.on ? autoStop('おまかせを終了しました') : autoStart(randomDriver()));
+for (const id of ['#ceilA','#ceilB','#autoMin','#autoLevel']) $(id).addEventListener('change', readAutoSettings);
 $('#applyBtn').addEventListener('click', async () => {
   st.lim.A = clampInt($('#limA').value, 200, st.lim.A);
   st.lim.B = clampInt($('#limB').value, 200, st.lim.B);
   st.balF  = clampInt($('#balF').value, 255, st.balF);
   st.balP  = clampInt($('#balP').value, 255, st.balP);
+  st.auto.ceil.A = Math.min(st.auto.ceil.A, st.lim.A);
+  st.auto.ceil.B = Math.min(st.auto.ceil.B, st.lim.B);
   saveSettings();
   setTarget('A', st.tA); setTarget('B', st.tB);   // 上限を超えていたら丸める
   if (st.connected) {
@@ -262,6 +302,7 @@ function tick(){
 }
 
 function emergency(reason){
+  if (st.auto.on) autoEnd();
   st.tA = st.tB = 0;
   if (st.connected) {
     const seq = nextSeq();
@@ -273,6 +314,103 @@ function emergency(reason){
   render();
 }
 
+// ---------- おまかせ（自動操作）----------
+// 操作役（driver）は autoSet() だけを通して強度を変える。値は「おまかせ上限」に対する 0-100%。
+// 上限とソフトリミットへの丸め、段階的な上昇（tick）、時間切れはここで強制するので、
+// 将来 AI や遠隔の相手を driver にしても、上限を超えることはない。
+// driver: {name, start(now), tick(now)}
+function readAutoSettings(){
+  st.auto.ceil.A  = Math.min(st.lim.A, clampInt($('#ceilA').value, 200, st.auto.ceil.A));
+  st.auto.ceil.B  = Math.min(st.lim.B, clampInt($('#ceilB').value, 200, st.auto.ceil.B));
+  st.auto.minutes = Math.max(1, clampInt($('#autoMin').value, 60, st.auto.minutes));
+  st.auto.level   = clampInt($('#autoLevel').value, 2, st.auto.level);
+  saveSettings(); render();
+}
+function autoSet(o){
+  if (!st.auto.on || !st.connected) return;
+  const pct = v => Math.max(0, Math.min(100, Number(v) || 0));
+  for (const ch of ['A','B']) {
+    const v = o[ch.toLowerCase()];
+    if (v == null) continue;
+    const ceil = Math.min(st.auto.ceil[ch], st.lim[ch]);
+    st['t'+ch] = Math.round(ceil * pct(v) / 100);
+  }
+  if (Number.isInteger(o.preset) && o.preset >= 0 && o.preset < PRESETS.length) st.preset = o.preset;
+  if (o.line != null) $('#autoLine').textContent = String(o.line).slice(0, 80);
+  render();
+}
+function autoStart(driver){
+  readAutoSettings();
+  if (!st.connected) { msg('先に本体に接続してください'); return; }
+  if (!st.auto.ceil.A && !st.auto.ceil.B) { msg('おまかせ上限が A/B とも 0 です'); return; }
+  const now = performance.now();
+  Object.assign(st.auto, {on:true, driver, until: now + st.auto.minutes * 60000});
+  st.tA = st.tB = 0;
+  driver.start(now);
+  st.auto.timer = setInterval(autoTick, 250);
+  msg(`おまかせ開始（${st.auto.minutes}分）。止めたいときは緊急停止を押してください`);
+  autoTick();
+}
+function autoTick(){
+  if (!st.auto.on) return;
+  const now = performance.now();
+  if (now >= st.auto.until) { autoStop('時間になったので、おまかせを終了しました'); return; }
+  try { st.auto.driver.tick(now); } catch(e) { emergency('おまかせでエラーが起きたため停止しました'); return; }
+  const left = Math.ceil((st.auto.until - now) / 1000);
+  $('#autoStatus').textContent = `${st.auto.driver.phase || ''}　残り ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
+}
+// 状態だけ片付ける（強度0への送信は呼び出し側）
+function autoEnd(){
+  clearInterval(st.auto.timer);
+  Object.assign(st.auto, {on:false, driver:null, timer:null});
+  $('#autoLine').textContent = '';
+  $('#autoStatus').textContent = '';
+}
+function autoStop(reason){
+  if (!st.auto.on) return;
+  autoEnd();
+  st.tA = st.tB = 0;                     // 下げるときは tick が一気に0にする
+  msg(reason);
+  render();
+}
+
+// ランダム責め。休憩・じらし・波・不意打ちのフェーズを、強さの設定に応じた確率で選ぶ
+function randomDriver(){
+  const R = (a, b) => a + Math.random() * (b - a);
+  const pick = a => a[Math.floor(Math.random() * a.length)];
+  const level = st.auto.level;
+  const scale = [0.6, 0.8, 1.0][level];
+  const PULSES = [3, 4, 5, 6], WAVES = [1, 2];   // PRESETS の番号
+  const PHASES = {
+    rest:  {name:'休憩',   w:[4, 3, 2],     sec:[4, 12],  pct:[0, 0],    lines:['少し休ませてあげる', 'まだ終わりじゃないよ', '油断しないでね']},
+    tease: {name:'じらし', w:[4, 4, 3],     sec:[6, 20],  pct:[15, 45],  lines:['少しずつね', 'じわじわいくよ', 'これくらいはまだ平気でしょ？']},
+    wave:  {name:'波',     w:[2, 3, 3],     sec:[8, 20],  pct:[30, 70],  lines:['波に合わせて', '強くなったり弱くなったり', 'ほら、だんだん来るよ']},
+    spike: {name:'不意打ち', w:[0.5, 1.5, 3], sec:[1, 4],  pct:[70, 100], lines:['油断した？', 'えいっ', '今のは効いた？']},
+  };
+  const d = {name:'random', phase:'', next:0,
+    start(now){ this.enter('rest', now); },
+    enter(key, now){
+      const p = PHASES[key];
+      this.phase = p.name;
+      this.next = now + R(p.sec[0], p.sec[1]) * 1000;
+      const v = Math.round(R(p.pct[0], p.pct[1]) * scale);
+      const ch = pick(['A', 'B', 'AB']);
+      autoSet({a: ch.includes('A') ? v : 0, b: ch.includes('B') ? v : 0,
+               preset: key === 'wave' ? pick(WAVES) : key === 'rest' ? st.preset : pick(PULSES),
+               line: pick(p.lines)});
+    },
+    tick(now){
+      if (now < this.next) return;
+      const keys = Object.keys(PHASES);
+      const total = keys.reduce((t, k) => t + PHASES[k].w[level], 0);
+      let r = Math.random() * total, key = keys[0];
+      for (const k of keys) { r -= PHASES[k].w[level]; if (r <= 0) { key = k; break; } }
+      this.enter(key, now);
+    }
+  };
+  return d;
+}
+
 // ---------- 受信 ----------
 function onNotify(e){
   const d = e.target.value;
@@ -281,6 +419,7 @@ function onNotify(e){
     st.aA = d.getUint8(2); st.aB = d.getUint8(3);
     if (seq !== 0 && seq === st.pending) st.pending = 0;
     if (seq === 0) {                       // 本体のダイヤル操作など：UIを実機に合わせる（上限は超えない）
+      if (st.auto.on) { emergency('本体のダイヤルが操作されたので、おまかせを終了しました'); return; }
       st.tA = Math.min(st.aA, st.lim.A);
       st.tB = Math.min(st.aB, st.lim.B);
     }
@@ -305,6 +444,7 @@ document.addEventListener('visibilitychange', () => {
 });
 
 function onDisc(){
+  if (st.auto.on) autoEnd();
   clearInterval(st.timer); st.timer = null;
   st.connected = false; st.chW = null; st.dev = null;
   st.tA = st.tB = 0; st.aA = st.aB = null; st.pending = 0;
