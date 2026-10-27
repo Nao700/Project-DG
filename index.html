@@ -86,6 +86,8 @@
     <div class="sub" style="margin:6px 0">キャラクター設定</div>
     <textarea id="aiPersona"></textarea>
     <label class="row" style="justify-content:flex-start"><input id="aiSpeak" type="checkbox" style="width:auto;min-height:auto"> セリフを読み上げる</label>
+    <div class="row" id="voiceRow" style="gap:6px"><select id="aiVoice" style="flex:1"></select><button id="voiceTest" style="flex:0 0 auto">試す</button></div>
+    <div class="sub" id="voiceHint"></div>
   </details>
   <button id="autoBtn" style="width:100%;margin-top:8px">おまかせ開始</button>
   <div class="react" id="reactBox" style="display:none">
@@ -237,7 +239,7 @@ try {
   }
 } catch(e) {}
 const AI_PERSONA_DEFAULT = 'ご主人様をからかうのが大好きな、小悪魔なメイド。口調は丁寧だけど意地悪で、短い言葉でじらしたり、不意打ちしたりする。';
-st.ai = {key:'', model:'', persona:AI_PERSONA_DEFAULT, speak:false, driver:'random', resolved:null, mi:0};
+st.ai = {key:'', model:'', persona:AI_PERSONA_DEFAULT, speak:false, voice:'', driver:'random', resolved:null, mi:0};
 try {
   const a = JSON.parse(localStorage.getItem('coyote-ai') || 'null');
   if (a && typeof a === 'object') {
@@ -245,11 +247,12 @@ try {
     st.ai.model = typeof a.model === 'string' ? a.model : '';
     st.ai.persona = typeof a.persona === 'string' && a.persona.trim() ? a.persona : AI_PERSONA_DEFAULT;
     st.ai.speak = a.speak === true;
+    st.ai.voice = typeof a.voice === 'string' ? a.voice : '';
     st.ai.driver = ['ai', 'local'].includes(a.driver) ? a.driver : 'random';
   }
 } catch(e) {}
 function saveAi(){
-  try { localStorage.setItem('coyote-ai', JSON.stringify({key:st.ai.key, model:st.ai.model, persona:st.ai.persona, speak:st.ai.speak, driver:st.ai.driver})); } catch(e) {}
+  try { localStorage.setItem('coyote-ai', JSON.stringify({key:st.ai.key, model:st.ai.model, persona:st.ai.persona, speak:st.ai.speak, voice:st.ai.voice, driver:st.ai.driver})); } catch(e) {}
 }
 function saveSettings(){
   try { localStorage.setItem('coyote-settings', JSON.stringify({v:2, limA:st.lim.A, limB:st.lim.B, balF:st.balF, balP:st.balP, pulseHz:st.pulseHz,
@@ -351,6 +354,8 @@ $('#aiKey').addEventListener('change', e => { st.ai.key = e.target.value.trim();
 $('#aiModel').addEventListener('change', e => { st.ai.model = e.target.value.trim(); st.ai.resolved = null; saveAi(); });
 $('#aiPersona').addEventListener('change', e => { st.ai.persona = e.target.value.trim() || AI_PERSONA_DEFAULT; saveAi(); render(); });
 $('#aiSpeak').addEventListener('change', e => { st.ai.speak = e.target.checked; saveAi(); });
+$('#aiVoice').addEventListener('change', e => { st.ai.voice = e.target.value; saveAi(); });
+$('#voiceTest').addEventListener('click', () => speak('こんにちは。この声で読み上げます', true));
 $('#localFile').addEventListener('change', async e => {
   const f = e.target.files && e.target.files[0];
   if (!f) return;
@@ -619,12 +624,35 @@ const AI_SCHEMA = {
   properties:{line:{type:'STRING'}, a:{type:'INTEGER'}, b:{type:'INTEGER'}, preset:{type:'INTEGER'}, hold:{type:'INTEGER'}},
   required:['line', 'a', 'b', 'preset', 'hold']
 };
-function speak(text){
-  if (!st.ai.speak || !window.speechSynthesis) return;
+// 読み上げの声。lang だけ指定すると、端末の既定エンジン（中国版ROMなど）によっては
+// 日本語を中国語の声で読んでしまうので、日本語の声を明示的に選ぶ
+const isJa = v => /^ja\b|^ja[-_]/i.test(v.lang);
+function jaVoices(){
+  if (!window.speechSynthesis) return [];
+  return speechSynthesis.getVoices().filter(isJa)
+    .sort((a, b) => (/google/i.test(b.name) - /google/i.test(a.name)) || (b.localService - a.localService));
+}
+function pickVoice(){
+  const list = jaVoices();
+  return list.find(v => v.voiceURI === st.ai.voice) || list[0] || null;
+}
+function fillVoices(){
+  const sel = $('#aiVoice'), list = jaVoices();
+  sel.innerHTML = '<option value="">自動（日本語の声）</option>'
+    + list.map(v => `<option value="${v.voiceURI.replace(/"/g, '&quot;')}">${v.name.replace(/</g, '&lt;')}</option>`).join('');
+  sel.value = list.some(v => v.voiceURI === st.ai.voice) ? st.ai.voice : '';
+  $('#voiceHint').textContent = !window.speechSynthesis ? 'このブラウザは読み上げに対応していません'
+    : list.length ? '' : '日本語の声が見つかりません。Android の設定 →「テキスト読み上げ」で、優先エンジンを「Google 音声サービス」にして日本語の音声データを入れてから、このページを開き直してください';
+}
+if (window.speechSynthesis) speechSynthesis.addEventListener('voiceschanged', fillVoices);
+function speak(text, force){
+  if ((!st.ai.speak && !force) || !window.speechSynthesis) return;
   try {
     speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(text);
     u.lang = 'ja-JP';
+    const v = pickVoice();
+    if (v) u.voice = v;
     speechSynthesis.speak(u);
   } catch(e) {}
 }
@@ -985,6 +1013,7 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
 }
 
 render();
+fillVoices();
 })();
 </script>
 </body>
