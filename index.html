@@ -183,7 +183,7 @@ try {
   }
 } catch(e) {}
 const AI_PERSONA_DEFAULT = 'ご主人様をからかうのが大好きな、小悪魔なメイド。口調は丁寧だけど意地悪で、短い言葉でじらしたり、不意打ちしたりする。';
-st.ai = {key:'', model:'', persona:AI_PERSONA_DEFAULT, speak:false, driver:'random', resolved:''};
+st.ai = {key:'', model:'', persona:AI_PERSONA_DEFAULT, speak:false, driver:'random', resolved:null, mi:0};
 try {
   const a = JSON.parse(localStorage.getItem('coyote-ai') || 'null');
   if (a && typeof a === 'object') {
@@ -279,7 +279,7 @@ $('#autoBtn').addEventListener('click', () => {
 });
 $('#driverSel').addEventListener('change', e => { st.ai.driver = e.target.value === 'ai' ? 'ai' : 'random'; saveAi(); render(); });
 $('#aiKey').addEventListener('change', e => { st.ai.key = e.target.value.trim(); saveAi(); });
-$('#aiModel').addEventListener('change', e => { st.ai.model = e.target.value.trim(); st.ai.resolved = ''; saveAi(); });
+$('#aiModel').addEventListener('change', e => { st.ai.model = e.target.value.trim(); st.ai.resolved = null; saveAi(); });
 $('#aiPersona').addEventListener('change', e => { st.ai.persona = e.target.value.trim() || AI_PERSONA_DEFAULT; saveAi(); render(); });
 $('#aiSpeak').addEventListener('change', e => { st.ai.speak = e.target.checked; saveAi(); });
 $('#reactBox').addEventListener('click', e => {
@@ -473,7 +473,8 @@ function randomDriver(){
 const GEMINI = 'https://generativelanguage.googleapis.com/v1beta';
 const AI_MIN_INTERVAL_MS = 7000;    // 無料枠のレート制限（毎分の回数）に収める
 const AI_TIMEOUT_MS = 15000;
-const AI_MAX_FAILS = 3;
+const AI_MAX_FAILS = 3;          // 混雑以外のエラーが続いたら終了する回数
+const AI_MAX_BUSY = 8;           // 混雑（429/5xx）が続いたら終了する回数（モデルを切り替えながら）
 const REACT_TEXT = {more:'もっと強く', less:'弱めて', wait:'待って（いったん止めて）'};
 
 async function geminiFetch(path, body, signal){
@@ -484,24 +485,39 @@ async function geminiFetch(path, body, signal){
     signal
   });
   const j = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error((j.error && j.error.message) || `HTTP ${res.status}`);
+  if (!res.ok) {
+    const err = new Error((j.error && j.error.message) || `HTTP ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
   return j;
 }
-// モデル名が空欄なら、使えるモデルの一覧から flash 系を選ぶ
-async function resolveModel(signal){
-  if (st.ai.model) return st.ai.model.replace(/^models\//, '');
+// 使うモデルの候補を、試す順に並べて返す。入力したモデルがあれば先頭にし、
+// 続けて一覧の flash 系（latest → 正式版 → lite → プレビュー、新しい順）を並べる。
+// 混雑（503）などのときは次の候補に切り替える
+async function resolveModels(signal){
   if (st.ai.resolved) return st.ai.resolved;
-  const j = await geminiFetch('models?pageSize=1000', null, signal);
-  const names = (j.models || [])
-    .filter(m => (m.supportedGenerationMethods || []).includes('generateContent'))
-    .map(m => m.name.replace(/^models\//, ''))
-    .filter(n => /flash/.test(n) && !/(image|tts|audio|live|embed|thinking)/.test(n));
-  const pick = names.find(n => n === 'gemini-flash-latest')
-    || names.filter(n => !/(preview|exp|lite)/.test(n)).sort().reverse()[0]
-    || names.sort().reverse()[0];
-  if (!pick) throw new Error('使える flash モデルが見つかりません');
-  st.ai.resolved = pick;
-  return pick;
+  const manual = st.ai.model ? [st.ai.model.replace(/^models\//, '')] : [];
+  let names = [];
+  try {
+    const j = await geminiFetch('models?pageSize=1000', null, signal);
+    names = (j.models || [])
+      .filter(m => (m.supportedGenerationMethods || []).includes('generateContent'))
+      .map(m => m.name.replace(/^models\//, ''))
+      .filter(n => /flash/.test(n) && !/(image|tts|audio|live|embed|thinking)/.test(n));
+  } catch(e) {
+    if (!manual.length) throw e;
+  }
+  const desc = a => a.sort().reverse();
+  const isPre = n => /(preview|exp)/.test(n), isLite = n => /lite/.test(n);
+  const ordered = names.filter(n => /-latest$/.test(n) && !isLite(n))
+    .concat(desc(names.filter(n => !/-latest$/.test(n) && !isPre(n) && !isLite(n))))
+    .concat(desc(names.filter(n => !isPre(n) && isLite(n))))
+    .concat(desc(names.filter(n => isPre(n))));
+  const list = [...new Set(manual.concat(ordered))];
+  if (!list.length) throw new Error('使える flash モデルが見つかりません');
+  st.ai.resolved = list;
+  return list;
 }
 function aiSystemPrompt(){
   return `あなたは次のキャラクターです: ${st.ai.persona}
@@ -534,7 +550,7 @@ function aiDriver(){
     const ceil = Math.min(st.auto.ceil[ch], st.lim[ch]);
     return ceil ? Math.round(st['t'+ch] / ceil * 100) : 0;
   };
-  const d = {name:'ai', phase:'AI', next:0, busy:false, fails:0, history:[], pending:[], t0:0, lastAsk:-1e9, ctrl:null,
+  const d = {name:'ai', phase:'AI', next:0, busy:false, fails:0, busyFails:0, history:[], pending:[], t0:0, lastAsk:-1e9, ctrl:null,
     start(now){ this.t0 = now; this.next = now; },
     stop(){ if (this.ctrl) this.ctrl.abort(); },
     tick(now){
@@ -558,7 +574,9 @@ function aiDriver(){
       this.ctrl = new AbortController();
       const to = setTimeout(() => this.ctrl.abort(), AI_TIMEOUT_MS);
       try {
-        const model = await resolveModel(this.ctrl.signal);
+        const models = await resolveModels(this.ctrl.signal);
+        const model = models[st.ai.mi % models.length];
+        this.model = model;
         const contents = this.history.concat([{role:'user', parts:[{text:userText}]}]);
         const j = await geminiFetch(`models/${encodeURIComponent(model)}:generateContent`, {
           systemInstruction:{parts:[{text:aiSystemPrompt()}]},
@@ -579,17 +597,30 @@ function aiDriver(){
         autoSet({a, b, preset: Number(r.preset), line}, this);
         speak(line);
         this.history = contents.concat([{role:'model', parts:[{text}]}]).slice(-12);
-        this.fails = 0;
+        this.fails = this.busyFails = 0;
         this.phase = 'AI';
         this.next = performance.now() + Math.max(7, Math.min(30, Number(r.hold) || 10)) * 1000;
       } catch(e) {
         if (st.auto.driver !== this) return;
-        this.fails++;
         autoSet({a:0, b:0, line:'（AI の応答待ち）'}, this);   // 失敗したら安全側に倒して0
-        this.phase = `AI エラー ${this.fails}/${AI_MAX_FAILS}`;
-        msg('AI エラー: ' + (e && e.name === 'AbortError' ? '時間切れ' : (e && e.message ? e.message : e)));
-        if (this.fails >= AI_MAX_FAILS) { autoStop('AI との通信に続けて失敗したので、おまかせを終了しました'); return; }
-        this.next = performance.now() + 10000;
+        const text = e && e.name === 'AbortError' ? '時間切れ' : (e && e.message ? e.message : String(e));
+        // 混雑・回数制限・モデルが見つからない → 次のモデルに切り替えて、すぐ再試行
+        const busy = e && (e.status === 429 || e.status === 404 || e.status >= 500 || e.name === 'AbortError');
+        if (busy) {
+          this.busyFails++;
+          if (st.ai.resolved && st.ai.resolved.length > 1) st.ai.mi = (st.ai.mi + 1) % st.ai.resolved.length;
+          const nextModel = st.ai.resolved ? st.ai.resolved[st.ai.mi % st.ai.resolved.length] : '';
+          this.phase = `AI 混雑 ${this.busyFails}/${AI_MAX_BUSY}`;
+          msg(`AI エラー（${this.model || ''}）: ${text}` + (nextModel && nextModel !== this.model ? ` → ${nextModel} で再試行します` : ' → 再試行します'));
+          if (this.busyFails >= AI_MAX_BUSY) { autoStop('AI が混み合っていて応答がないので、おまかせを終了しました'); return; }
+          this.next = 0;                                 // 最短間隔（7秒）が空いたらすぐ
+        } else {
+          this.fails++;
+          this.phase = `AI エラー ${this.fails}/${AI_MAX_FAILS}`;
+          msg(`AI エラー（${this.model || ''}）: ${text}`);
+          if (this.fails >= AI_MAX_FAILS) { autoStop('AI との通信に続けて失敗したので、おまかせを終了しました'); return; }
+          this.next = performance.now() + 10000;
+        }
       } finally {
         clearTimeout(to);
         this.busy = false;
