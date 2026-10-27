@@ -96,6 +96,9 @@
 </div>
 
 <div class="card">
+  <div class="row" style="margin-top:0"><span>パルス周波数</span><b id="pulseHzV"></b></div>
+  <input type="range" id="pulseHz" min="10" max="100" step="5">
+  <div class="sub" style="display:flex;justify-content:space-between;margin-bottom:10px"><span>← 低い：ズンと重い・痛みやすい</span><span>高い：細かくピリピリ →</span></div>
   <div class="sub" style="margin-bottom:8px">波形プリセット（A/B共通）</div>
   <div class="presets" id="presets"></div>
 </div>
@@ -122,21 +125,28 @@ const SVC_MAIN = 0x180c, CH_WRITE = 0x150a, CH_NOTIFY = 0x150b;
 const SVC_BATT = 0x180a, CH_BATT = 0x1500;
 
 // ---------- 安全設定 ----------
-const DEFAULTS = {limA:60, limB:60, balF:160, balP:0};   // バランス値は仮置き（公式推奨値は未確認）
+// バランス値: 128 が中立とされる（非公式資料より。公式の推奨値は未確認）。周波数バランスは高いほど低周波の衝撃が強くなる
+// パルス幅バランスも高いほど低周波の刺激が強くなるので、弱い側の 0 のままにする
+const DEFAULTS = {limA:60, limB:60, balF:128, balP:0, pulseHz:50};
+const PULSE_HZ_MIN = 10, PULSE_HZ_MAX = 100;
 const AUTO_DEFAULTS = {ceilA:20, ceilB:20, minutes:10, level:1};
 const MAX_STEP_UP = 5;        // 強度を上げるときの1回あたりの上限（下げるときは一気に）
 const B1_TIMEOUT_MS = 600;    // B1 の応答を待つ時間。過ぎたら再送する
 
 // ---------- 波形プリセット ----------
 // shape: 'sine' | 'square' / freq: Hz / str: 強度エンベロープ(0-100%)
+// 周波数（パルスの細かさ）はプリセットでは決めず、設定の「パルス周波数」を全プリセット共通で使う。
+// 低い周波数（数Hz）は1発ずつの「ドンッ」という鈍い衝撃になって痛みやすいため、リズムは強度の変化だけで作る。
+// shape: 'sine'（なめらかに上下）| 'pulse'（台形。立ち上がり・立ち下がりをなだらかにする）
+// sMin/sMax: 強度エンベロープ(0-100%) / sCycle: その周期(ms) / fMod: 周波数を ±何割ゆらすか / fCycle: その周期
 const PRESETS = [
-  {name:'Steady',    shape:'square', fMin:10, fMax:10, fCycle:1,    sMin:100, sMax:100, sCycle:1000},
-  {name:'Breath',    shape:'sine',   fMin:5,  fMax:20, fCycle:4000, sMin:20,  sMax:80,  sCycle:4000},
-  {name:'Tide',      shape:'sine',   fMin:3,  fMax:15, fCycle:6000, sMin:10,  sMax:90,  sCycle:3000},
-  {name:'PulseLow',  shape:'square', fMin:2,  fMax:2,  fCycle:1,    sMin:10,  sMax:45,  sCycle:800},
-  {name:'PulseMid',  shape:'square', fMin:8,  fMax:8,  fCycle:1,    sMin:10,  sMax:55,  sCycle:500},
-  {name:'PulseHigh', shape:'square', fMin:20, fMax:20, fCycle:1,    sMin:10,  sMax:65,  sCycle:250},
-  {name:'Tap',       shape:'square', fMin:30, fMax:30, fCycle:1,    sMin:0,   sMax:70,  sCycle:120},
+  {name:'Steady',    shape:'sine',  sMin:100, sMax:100, sCycle:1000, fMod:0},
+  {name:'Breath',    shape:'sine',  sMin:20,  sMax:80,  sCycle:4000, fMod:0},
+  {name:'Tide',      shape:'sine',  sMin:10,  sMax:90,  sCycle:3000, fMod:0.3, fCycle:6000},
+  {name:'PulseLow',  shape:'pulse', sMin:10,  sMax:45,  sCycle:1600, fMod:0},
+  {name:'PulseMid',  shape:'pulse', sMin:10,  sMax:55,  sCycle:1000, fMod:0},
+  {name:'PulseHigh', shape:'pulse', sMin:10,  sMax:65,  sCycle:500,  fMod:0},
+  {name:'Tap',       shape:'pulse', sMin:0,   sMax:70,  sCycle:400,  fMod:0},
 ];
 
 // 周期(ms) → V3の周波数入力値(10-240)。10-100はそのまま、101-600は(x-100)/5+100、601-1000は(x-600)/10+200
@@ -145,20 +155,20 @@ function periodToRaw(ms){
   let r = ms <= 100 ? ms : ms <= 600 ? (ms - 100) / 5 + 100 : (ms - 600) / 10 + 200;
   return Math.max(10, Math.min(240, Math.round(r)));
 }
-function sample(p, t){
-  let hz = p.fMax;
+// t(ms) における（周波数の入力値, 強度0-100）を返す。hz は設定のパルス周波数
+function sample(p, t, hz){
+  let f = hz;
+  if (p.fMod) f = hz * (1 + p.fMod * Math.sin(2 * Math.PI * ((t % p.fCycle) / p.fCycle)));
+  const ph = (t % p.sCycle) / p.sCycle;
+  let k;                                                 // 0..1
   if (p.shape === 'sine') {
-    const s = (1 - Math.cos(2 * Math.PI * ((t % p.fCycle) / p.fCycle))) / 2;
-    hz = p.fMin + s * (p.fMax - p.fMin);
-  }
-  let pct;
-  if (p.shape === 'sine') {
-    const s = (1 - Math.cos(2 * Math.PI * ((t % p.sCycle) / p.sCycle))) / 2;
-    pct = p.sMin + s * (p.sMax - p.sMin);
+    k = (1 - Math.cos(2 * Math.PI * ph)) / 2;
   } else {
-    pct = (t % p.sCycle) < p.sCycle / 2 ? p.sMax : p.sMin;
+    // 台形: 20% で立ち上がり、30% 保持、20% で立ち下がり、30% 休み（角のない矩形）
+    k = ph < 0.2 ? ph / 0.2 : ph < 0.5 ? 1 : ph < 0.7 ? 1 - (ph - 0.5) / 0.2 : 0;
   }
-  return {f: periodToRaw(1000 / Math.max(hz, 0.5)), s: Math.max(0, Math.min(100, Math.round(pct)))};
+  const pct = p.sMin + k * (p.sMax - p.sMin);
+  return {f: periodToRaw(1000 / Math.max(f, 1)), s: Math.max(0, Math.min(100, Math.round(pct)))};
 }
 
 // ---------- 状態 ----------
@@ -167,7 +177,7 @@ const st = {
   tA:0, tB:0, aA:null, aB:null,     // 目標 / 本体から通知された実強度（null は不明）
   seq:0, pending:0, pendingAt:0,
   preset:0, t0:performance.now(), timer:null, qd:0, queue:Promise.resolve(),
-  lim:{A:DEFAULTS.limA, B:DEFAULTS.limB}, balF:DEFAULTS.balF, balP:DEFAULTS.balP, batt:null, wl:null,
+  lim:{A:DEFAULTS.limA, B:DEFAULTS.limB}, balF:DEFAULTS.balF, balP:DEFAULTS.balP, pulseHz:DEFAULTS.pulseHz, batt:null, wl:null,
   // おまかせ: ceil は操作役が上げられる上限（ソフトリミット以下に丸める）
   auto:{on:false, driver:null, until:0, timer:null, ceil:{A:AUTO_DEFAULTS.ceilA, B:AUTO_DEFAULTS.ceilB}, minutes:AUTO_DEFAULTS.minutes, level:AUTO_DEFAULTS.level}
 };
@@ -185,6 +195,8 @@ try {
     st.lim.B = clampInt(s.limB, 200, DEFAULTS.limB);
     st.balF  = clampInt(s.balF, 255, DEFAULTS.balF);
     st.balP  = clampInt(s.balP, 255, DEFAULTS.balP);
+    if (s.v !== 2 && st.balF === 160) st.balF = DEFAULTS.balF;   // 旧版の既定値 160（低周波が強め）を中立に戻す
+    st.pulseHz = Math.max(PULSE_HZ_MIN, clampInt(s.pulseHz, PULSE_HZ_MAX, DEFAULTS.pulseHz));
     st.auto.ceil.A  = clampInt(s.ceilA, 200, AUTO_DEFAULTS.ceilA);
     st.auto.ceil.B  = clampInt(s.ceilB, 200, AUTO_DEFAULTS.ceilB);
     st.auto.minutes = Math.max(1, clampInt(s.autoMin, 60, AUTO_DEFAULTS.minutes));
@@ -207,7 +219,7 @@ function saveAi(){
   try { localStorage.setItem('coyote-ai', JSON.stringify({key:st.ai.key, model:st.ai.model, persona:st.ai.persona, speak:st.ai.speak, driver:st.ai.driver})); } catch(e) {}
 }
 function saveSettings(){
-  try { localStorage.setItem('coyote-settings', JSON.stringify({limA:st.lim.A, limB:st.lim.B, balF:st.balF, balP:st.balP,
+  try { localStorage.setItem('coyote-settings', JSON.stringify({v:2, limA:st.lim.A, limB:st.lim.B, balF:st.balF, balP:st.balP, pulseHz:st.pulseHz,
     ceilA:st.auto.ceil.A, ceilB:st.auto.ceil.B, autoMin:st.auto.minutes, autoLevel:st.auto.level})); } catch(e) {}
 }
 
@@ -236,6 +248,7 @@ function render(){
     sl.value = st['t'+ch];
   }
   document.querySelectorAll('#presets button').forEach((b, i) => b.classList.toggle('sel', i === st.preset));
+  $('#pulseHz').value = st.pulseHz; $('#pulseHzV').textContent = `${st.pulseHz} Hz`;
   $('#limA').value = st.lim.A; $('#limB').value = st.lim.B;
   $('#balF').value = st.balF;  $('#balP').value = st.balP;
   $('#dot').classList.toggle('on', st.connected);
@@ -282,6 +295,11 @@ document.addEventListener('click', e => {
   if (b.dataset.p && !st.auto.on) { st.preset = Number(b.dataset.p); render(); }
 });
 for (const ch of ['A','B']) $('#sl'+ch).addEventListener('input', e => setTarget(ch, Number(e.target.value)));
+// パルス周波数は刺激の質だけを変えるので、おまかせ中でも調整できる
+$('#pulseHz').addEventListener('input', e => {
+  st.pulseHz = Math.max(PULSE_HZ_MIN, clampInt(e.target.value, PULSE_HZ_MAX, st.pulseHz));
+  saveSettings(); render();
+});
 $('#stop').addEventListener('click', () => emergency());
 $('#connectBtn').addEventListener('click', () => st.connected ? disconnect() : connect(false));
 $('#scanAllBtn').addEventListener('click', () => { if (!st.connected) connect(true); });
@@ -357,7 +375,7 @@ function frame(seq, mode, vA, vB, t, silent){
   const b = new Uint8Array(20);
   b[0] = 0xB0; b[1] = (seq << 4) | mode; b[2] = vA; b[3] = vB;
   for (let i = 0; i < 4; i++) {
-    const s = sample(p, t + i * 25);
+    const s = sample(p, t + i * 25, st.pulseHz);
     const amp = silent ? 0 : s.s;
     b[4+i] = s.f; b[8+i] = amp;     // A: 周波数4 / 強度4
     b[12+i] = s.f; b[16+i] = amp;   // B: 周波数4 / 強度4
