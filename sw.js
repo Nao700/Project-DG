@@ -1,6 +1,6 @@
 // オフラインでも開けるようにアプリ本体をキャッシュする。
 // ファイルを更新したら VERSION を上げること（古いキャッシュが消える）
-const VERSION = 'coyote-v5';
+const VERSION = 'coyote-v6';
 const FILES = ['./', './index.html', './manifest.webmanifest', './icon.svg', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {
