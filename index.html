@@ -67,15 +67,24 @@
   <div class="row"><span>おまかせ上限 B</span><input id="ceilB" type="number" min="0" max="200" inputmode="numeric"></div>
   <div class="row"><span>時間（分, 1-60）</span><input id="autoMin" type="number" min="1" max="60" inputmode="numeric"></div>
   <div class="row"><span>責めの強さ</span><select id="autoLevel"><option value="0">やさしめ</option><option value="1">ふつう</option><option value="2">きびしめ</option></select></div>
-  <div class="row"><span>責める役</span><select id="driverSel"><option value="random">ランダム</option><option value="ai">AI（Gemini）</option></select></div>
+  <div class="row"><span>責める役</span><select id="driverSel"><option value="random">ランダム</option><option value="ai">AI（Gemini）</option><option value="local">AI（端末内）</option></select></div>
   <details id="aiBox">
-    <summary>AI の設定（Gemini）</summary>
-    <div class="row"><span>APIキー</span><input id="aiKey" class="wide" type="password" autocomplete="off" placeholder="AI Studio で発行"></div>
-    <div class="row"><span>モデル</span><input id="aiModel" class="wide" type="text" autocomplete="off" placeholder="空欄で自動（flash）"></div>
+    <summary>AI の設定</summary>
+    <div id="geminiFields">
+      <div class="row"><span>APIキー</span><input id="aiKey" class="wide" type="password" autocomplete="off" placeholder="AI Studio で発行"></div>
+      <div class="row"><span>モデル</span><input id="aiModel" class="wide" type="text" autocomplete="off" placeholder="空欄で自動（flash）"></div>
+      <div class="sub">キーはこの端末のブラウザにだけ保存されます。Gemini の無料枠では、入力内容が Google のサービス改善に使われることがあります。</div>
+    </div>
+    <div id="localFields">
+      <div class="row"><span>モデル</span><span class="sub" id="localInfo">未設定</span></div>
+      <input id="localFile" type="file" accept=".task,.litertlm,.bin" style="width:100%;margin:4px 0">
+      <div class="sub" id="localProg"></div>
+      <button id="localDel" style="width:100%;min-height:40px;margin-top:6px">保存したモデルを削除</button>
+      <div class="sub" style="margin-top:6px">Hugging Face の litert-community などで配布されている、名前に「-web」が付いたモデルファイル（.task / .litertlm）を選んでください。一度選べばこの端末のブラウザ内に保存され、次回から選び直す必要はありません。会話はすべて端末の中で処理され、外には送られません。WebGPU に対応した Chrome が必要です。</div>
+    </div>
     <div class="sub" style="margin:6px 0">キャラクター設定</div>
     <textarea id="aiPersona"></textarea>
     <label class="row" style="justify-content:flex-start"><input id="aiSpeak" type="checkbox" style="width:auto;min-height:auto"> セリフを読み上げる</label>
-    <div class="sub">キーはこの端末のブラウザにだけ保存されます。Gemini の無料枠では、入力内容が Google のサービス改善に使われることがあります。</div>
   </details>
   <button id="autoBtn" style="width:100%;margin-top:8px">おまかせ開始</button>
   <div class="react" id="reactBox" style="display:none">
@@ -191,7 +200,7 @@ try {
     st.ai.model = typeof a.model === 'string' ? a.model : '';
     st.ai.persona = typeof a.persona === 'string' && a.persona.trim() ? a.persona : AI_PERSONA_DEFAULT;
     st.ai.speak = a.speak === true;
-    st.ai.driver = a.driver === 'ai' ? 'ai' : 'random';
+    st.ai.driver = ['ai', 'local'].includes(a.driver) ? a.driver : 'random';
   }
 } catch(e) {}
 function saveAi(){
@@ -241,8 +250,14 @@ function render(){
   }
   document.querySelectorAll('[data-d],[data-p],#ceilA,#ceilB,#autoMin,#autoLevel,#driverSel,#aiKey,#aiModel,#aiPersona').forEach(el => { el.disabled = on; });
   $('#driverSel').value = st.ai.driver;
-  $('#aiBox').style.display = st.ai.driver === 'ai' ? '' : 'none';
-  $('#autoLevel').closest('.row').style.display = st.ai.driver === 'ai' ? 'none' : '';
+  const ai = st.ai.driver !== 'random';
+  $('#aiBox').style.display = ai ? '' : 'none';
+  $('#geminiFields').style.display = st.ai.driver === 'ai' ? '' : 'none';
+  $('#localFields').style.display = st.ai.driver === 'local' ? '' : 'none';
+  $('#autoLevel').closest('.row').style.display = ai ? 'none' : '';
+  const m = st.local.meta;
+  $('#localInfo').textContent = m ? `${m.name}（${(m.size / 1e9).toFixed(2)} GB）` : '未設定';
+  $('#localFile').disabled = on; $('#localDel').disabled = on || !m;
   $('#reactBox').style.display = on && st.auto.driver && st.auto.driver.react ? '' : 'none';
   if (document.activeElement !== $('#aiKey')) $('#aiKey').value = st.ai.key;
   if (document.activeElement !== $('#aiModel')) $('#aiModel').value = st.ai.model;
@@ -274,14 +289,31 @@ $('#autoBtn').addEventListener('click', () => {
   if (st.auto.on) { autoStop('おまかせを終了しました'); return; }
   if (st.ai.driver === 'ai') {
     if (!st.ai.key) { msg('AI の設定に Gemini の APIキーを入れてください'); return; }
-    autoStart(aiDriver());
+    autoStart(aiDriver(geminiBackend()));
+  } else if (st.ai.driver === 'local') {
+    if (!st.local.meta && !window.__coyoteTestLlm) { msg('AI の設定でモデルファイルを選んでください'); return; }
+    autoStart(aiDriver(localBackend()));
   } else autoStart(randomDriver());
 });
-$('#driverSel').addEventListener('change', e => { st.ai.driver = e.target.value === 'ai' ? 'ai' : 'random'; saveAi(); render(); });
+$('#driverSel').addEventListener('change', e => { st.ai.driver = ['ai', 'local'].includes(e.target.value) ? e.target.value : 'random'; saveAi(); render(); });
 $('#aiKey').addEventListener('change', e => { st.ai.key = e.target.value.trim(); saveAi(); });
 $('#aiModel').addEventListener('change', e => { st.ai.model = e.target.value.trim(); st.ai.resolved = null; saveAi(); });
 $('#aiPersona').addEventListener('change', e => { st.ai.persona = e.target.value.trim() || AI_PERSONA_DEFAULT; saveAi(); render(); });
 $('#aiSpeak').addEventListener('change', e => { st.ai.speak = e.target.checked; saveAi(); });
+$('#localFile').addEventListener('change', async e => {
+  const f = e.target.files && e.target.files[0];
+  if (!f) return;
+  $('#localProg').textContent = '端末内に保存中… 0%';
+  try {
+    await saveLocalModel(f, r => { $('#localProg').textContent = `端末内に保存中… ${Math.floor(r * 100)}%`; });
+    $('#localProg').textContent = '保存しました';
+  } catch(err) {
+    $('#localProg').textContent = '保存に失敗しました: ' + (err && err.message ? err.message : err) + '（空き容量を確認してください）';
+  }
+  e.target.value = '';
+  render();
+});
+$('#localDel').addEventListener('click', async () => { await deleteLocalModel(); $('#localProg').textContent = '削除しました'; render(); });
 $('#reactBox').addEventListener('click', e => {
   const b = e.target.closest('[data-r]');
   if (b && st.auto.on && st.auto.driver && st.auto.driver.react) st.auto.driver.react(b.dataset.r);
@@ -545,50 +577,39 @@ function speak(text){
   } catch(e) {}
 }
 
-function aiDriver(){
+// AI の操作役。誰に聞くか（Gemini / 端末内モデル）は backend で差し替える。
+// backend: {label, minInterval, timeout, prepare?(), ask(userText, history, signal) -> {r, raw}, onBusy?(), stop?()}
+// ask() が投げたエラーに busy=true が付いていれば「混雑」扱い（切り替えてすぐ再試行）
+function aiDriver(backend){
   const pctNow = ch => {
     const ceil = Math.min(st.auto.ceil[ch], st.lim[ch]);
     return ceil ? Math.round(st['t'+ch] / ceil * 100) : 0;
   };
-  const d = {name:'ai', phase:'AI', next:0, busy:false, fails:0, busyFails:0, history:[], pending:[], t0:0, lastAsk:-1e9, ctrl:null,
+  const d = {name:'ai', phase:'AI', next:0, busy:false, fails:0, busyFails:0, history:[], pending:[], t0:0, lastAsk:-1e9, ctrl:null, react:null,
     start(now){ this.t0 = now; this.next = now; },
-    stop(){ if (this.ctrl) this.ctrl.abort(); },
+    stop(){ if (this.ctrl) this.ctrl.abort(); if (backend.stop) backend.stop(); },
     tick(now){
-      if (this.busy || now < this.next || now - this.lastAsk < AI_MIN_INTERVAL_MS) return;
+      if (this.busy || now < this.next || now - this.lastAsk < backend.minInterval) return;
       this.ask(now);
     },
-    react(kind){
-      if (!REACT_TEXT[kind]) return;
-      if (kind === 'wait') autoSet({a:0, b:0, line:'（止めました）'}, this);   // AI の返事を待たずにすぐ止める
-      if (kind === 'less') autoSet({a:Math.floor(pctNow('A') / 2), b:Math.floor(pctNow('B') / 2)}, this);
-      this.pending.push(REACT_TEXT[kind]);
-      this.next = 0;                                   // 最短間隔を守りつつ、すぐに次を聞く
-    },
     async ask(now){
-      this.busy = true; this.lastAsk = now; this.phase = 'AI 考え中…';
+      this.busy = true; this.lastAsk = now;
       const elapsed = Math.round((now - this.t0) / 1000), left = Math.max(0, Math.round((st.auto.until - now) / 1000));
       const fmt = s => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
       const reaction = this.pending.length ? this.pending.join('、') : 'なし';
       this.pending = [];
       const userText = `経過 ${fmt(elapsed)} / 残り ${fmt(left)}。現在 A=${pctNow('A')}% B=${pctNow('B')}% 波形=${PRESETS[st.preset].name}。ユーザーの反応: ${reaction}`;
-      this.ctrl = new AbortController();
-      const to = setTimeout(() => this.ctrl.abort(), AI_TIMEOUT_MS);
+      let to = null;
       try {
-        const models = await resolveModels(this.ctrl.signal);
-        const model = models[st.ai.mi % models.length];
-        this.model = model;
-        const contents = this.history.concat([{role:'user', parts:[{text:userText}]}]);
-        const j = await geminiFetch(`models/${encodeURIComponent(model)}:generateContent`, {
-          systemInstruction:{parts:[{text:aiSystemPrompt()}]},
-          contents,
-          generationConfig:{responseMimeType:'application/json', responseSchema:AI_SCHEMA, temperature:1.0},
-          safetySettings:['HARM_CATEGORY_HARASSMENT', 'HARM_CATEGORY_HATE_SPEECH', 'HARM_CATEGORY_SEXUALLY_EXPLICIT', 'HARM_CATEGORY_DANGEROUS_CONTENT']
-            .map(category => ({category, threshold:'BLOCK_ONLY_HIGH'}))
-        }, this.ctrl.signal);
-        const text = j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts
-          && j.candidates[0].content.parts.map(p => p.text || '').join('');
-        if (!text) throw new Error('AI の応答が空でした（安全フィルタで止められた可能性があります）');
-        const r = JSON.parse(text);
+        if (backend.prepare) {                       // モデルの読み込みなど（時間制限なし。その間の強度は0）
+          this.phase = `${backend.label} 準備中…`;
+          await backend.prepare(t => { if (st.auto.driver === this) this.phase = t; });
+          if (st.auto.driver !== this) return;
+        }
+        this.phase = 'AI 考え中…';
+        this.ctrl = new AbortController();
+        to = setTimeout(() => this.ctrl.abort(), backend.timeout);
+        const {r, raw} = await backend.ask(userText, this.history, this.ctrl.signal);
         if (st.auto.driver !== this) return;            // 応答待ちの間に終了していた
         let a = Number(r.a), b = Number(r.b);
         if (!Number.isFinite(a) || !Number.isFinite(b)) throw new Error('AI の応答の形式が不正です');
@@ -596,7 +617,7 @@ function aiDriver(){
         const line = String(r.line || '').slice(0, 60);
         autoSet({a, b, preset: Number(r.preset), line}, this);
         speak(line);
-        this.history = contents.concat([{role:'model', parts:[{text}]}]).slice(-12);
+        this.history = this.history.concat([{user:userText, model:raw}]).slice(-6);
         this.fails = this.busyFails = 0;
         this.phase = 'AI';
         this.next = performance.now() + Math.max(7, Math.min(30, Number(r.hold) || 10)) * 1000;
@@ -604,22 +625,21 @@ function aiDriver(){
         if (st.auto.driver !== this) return;
         autoSet({a:0, b:0, line:'（AI の応答待ち）'}, this);   // 失敗したら安全側に倒して0
         const text = e && e.name === 'AbortError' ? '時間切れ' : (e && e.message ? e.message : String(e));
-        // 混雑・回数制限・モデルが見つからない → 次のモデルに切り替えて、すぐ再試行
-        const busy = e && (e.status === 429 || e.status === 404 || e.status >= 500 || e.name === 'AbortError');
-        if (busy) {
+        const label = backend.label;
+        if (e && e.busy) {
           this.busyFails++;
-          if (st.ai.resolved && st.ai.resolved.length > 1) st.ai.mi = (st.ai.mi + 1) % st.ai.resolved.length;
-          const nextModel = st.ai.resolved ? st.ai.resolved[st.ai.mi % st.ai.resolved.length] : '';
+          const nextLabel = backend.onBusy ? backend.onBusy() : '';
           this.phase = `AI 混雑 ${this.busyFails}/${AI_MAX_BUSY}`;
-          msg(`AI エラー（${this.model || ''}）: ${text}` + (nextModel && nextModel !== this.model ? ` → ${nextModel} で再試行します` : ' → 再試行します'));
+          msg(`AI エラー（${label}）: ${text}` + (nextLabel && nextLabel !== label ? ` → ${nextLabel} で再試行します` : ' → 再試行します'));
           if (this.busyFails >= AI_MAX_BUSY) { autoStop('AI が混み合っていて応答がないので、おまかせを終了しました'); return; }
-          this.next = 0;                                 // 最短間隔（7秒）が空いたらすぐ
+          this.next = 0;                                 // 最短間隔が空いたらすぐ
         } else {
           this.fails++;
           this.phase = `AI エラー ${this.fails}/${AI_MAX_FAILS}`;
-          msg(`AI エラー（${this.model || ''}）: ${text}`);
-          if (this.fails >= AI_MAX_FAILS) { autoStop('AI との通信に続けて失敗したので、おまかせを終了しました'); return; }
-          this.next = performance.now() + 10000;
+          msg(`AI エラー（${label}）: ${text}`);
+          if (e && e.fatal) { autoStop(`AI を使えないので、おまかせを終了しました: ${text}`); return; }
+          if (this.fails >= AI_MAX_FAILS) { autoStop('AI の応答に続けて失敗したので、おまかせを終了しました'); return; }
+          this.next = performance.now() + 5000;
         }
       } finally {
         clearTimeout(to);
@@ -627,7 +647,184 @@ function aiDriver(){
       }
     }
   };
+  d.react = kind => {
+    if (!REACT_TEXT[kind]) return;
+    if (kind === 'wait') autoSet({a:0, b:0, line:'（止めました）'}, d);   // AI の返事を待たずにすぐ止める
+    if (kind === 'less') autoSet({a:Math.floor(pctNow('A') / 2), b:Math.floor(pctNow('B') / 2)}, d);
+    d.pending.push(REACT_TEXT[kind]);
+    d.next = 0;                                      // 最短間隔を守りつつ、すぐに次を聞く
+  };
   return d;
+}
+
+function geminiBackend(){
+  return {label:'Gemini', minInterval:AI_MIN_INTERVAL_MS, timeout:AI_TIMEOUT_MS,
+    async ask(userText, history, signal){
+      try {
+        const models = await resolveModels(signal);
+        const model = models[st.ai.mi % models.length];
+        this.label = model;
+        const contents = [];
+        for (const h of history) contents.push({role:'user', parts:[{text:h.user}]}, {role:'model', parts:[{text:h.model}]});
+        contents.push({role:'user', parts:[{text:userText}]});
+        const j = await geminiFetch(`models/${encodeURIComponent(model)}:generateContent`, {
+          systemInstruction:{parts:[{text:aiSystemPrompt()}]},
+          contents,
+          generationConfig:{responseMimeType:'application/json', responseSchema:AI_SCHEMA, temperature:1.0},
+          safetySettings:['HARM_CATEGORY_HARASSMENT', 'HARM_CATEGORY_HATE_SPEECH', 'HARM_CATEGORY_SEXUALLY_EXPLICIT', 'HARM_CATEGORY_DANGEROUS_CONTENT']
+            .map(category => ({category, threshold:'BLOCK_ONLY_HIGH'}))
+        }, signal);
+        const raw = j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts
+          && j.candidates[0].content.parts.map(p => p.text || '').join('');
+        if (!raw) throw new Error('AI の応答が空でした（安全フィルタで止められた可能性があります）');
+        return {r: JSON.parse(raw), raw};
+      } catch(e) {
+        // 混雑・回数制限・モデルが見つからない・時間切れ → 次のモデルに切り替えて再試行
+        if (e && (e.status === 429 || e.status === 404 || e.status >= 500 || e.name === 'AbortError')) e.busy = true;
+        throw e;
+      }
+    },
+    onBusy(){
+      if (st.ai.resolved && st.ai.resolved.length > 1) st.ai.mi = (st.ai.mi + 1) % st.ai.resolved.length;
+      return st.ai.resolved ? st.ai.resolved[st.ai.mi % st.ai.resolved.length] : '';
+    }
+  };
+}
+
+// ---------- 端末内 AI（MediaPipe LLM Inference, WebGPU）----------
+// モデルファイル（*-web.task など）は利用者が選び、OPFS（ブラウザ内の保存領域）にコピーして使い回す
+const MP_BASE = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-genai@0.10.29';
+const LOCAL_FILE = 'coyote-model.bin';
+const LOCAL_TIMEOUT_MS = 60000;
+st.local = {llm:null, loading:null, meta:null};
+try { st.local.meta = JSON.parse(localStorage.getItem('coyote-local-model') || 'null'); } catch(e) {}
+
+async function opfsRoot(){
+  if (!navigator.storage || !navigator.storage.getDirectory) throw new Error('このブラウザはファイルの保存に対応していません');
+  return navigator.storage.getDirectory();
+}
+async function saveLocalModel(file, onProgress){
+  const root = await opfsRoot();
+  const fh = await root.getFileHandle(LOCAL_FILE, {create:true});
+  const w = await fh.createWritable();
+  const reader = file.stream().getReader();
+  let done = 0;
+  try {
+    for (;;) {
+      const {value, done: end} = await reader.read();
+      if (end) break;
+      await w.write(value);
+      done += value.byteLength;
+      onProgress(done / file.size);
+    }
+    await w.close();
+  } catch(e) {
+    try { await w.abort(); } catch(_) {}
+    throw e;
+  }
+  st.local.meta = {name:file.name, size:file.size};
+  st.local.llm = null;                                // 次に使うときに読み込み直す
+  try { localStorage.setItem('coyote-local-model', JSON.stringify(st.local.meta)); } catch(e) {}
+}
+async function deleteLocalModel(){
+  try { await (await opfsRoot()).removeEntry(LOCAL_FILE); } catch(e) {}
+  st.local.meta = null; st.local.llm = null;
+  try { localStorage.removeItem('coyote-local-model'); } catch(e) {}
+}
+async function loadLocalLlm(onStatus){
+  if (window.__coyoteTestLlm) return window.__coyoteTestLlm;   // テスト用の差し替え口
+  if (st.local.llm) return st.local.llm;
+  if (st.local.loading) return st.local.loading;
+  st.local.loading = (async () => {
+    if (!navigator.gpu) { const e = new Error('この端末の Chrome は WebGPU に対応していないため、端末内 AI を使えません'); e.fatal = true; throw e; }
+    let file;
+    try { file = await (await (await opfsRoot()).getFileHandle(LOCAL_FILE)).getFile(); }
+    catch(e) { const err = new Error('モデルファイルがまだ選ばれていません'); err.fatal = true; throw err; }
+    onStatus('AI ライブラリを読み込み中…');
+    const {FilesetResolver, LlmInference} = await import(`${MP_BASE}/genai_bundle.mjs`);
+    const fileset = await FilesetResolver.forGenAiTasks(`${MP_BASE}/wasm`);
+    onStatus('モデルを読み込み中…（数十秒かかります）');
+    const llm = await LlmInference.createFromOptions(fileset, {
+      baseOptions:{modelAssetBuffer: file.stream().getReader()},
+      maxTokens:1280, topK:40, temperature:0.9, randomSeed:Math.floor(Math.random() * 1e6)
+    });
+    st.local.llm = llm;
+    return llm;
+  })();
+  try { return await st.local.loading; }
+  finally { st.local.loading = null; }
+}
+
+// モデルの種類ごとの会話の書式（ファイル名で判断）
+function chatFormat(name){
+  name = (name || '').toLowerCase();
+  if (/gemma-?4/.test(name)) return 'gemma4';
+  if (/qwen|phi|smol|chatml/.test(name)) return 'chatml';
+  return 'gemma';
+}
+function buildLocalPrompt(fmt, sys, history, userText){
+  const turns = history.flatMap(h => [['user', h.user], ['model', h.model]]).concat([['user', userText]]);
+  if (fmt === 'gemma4') {
+    return `<|turn>system\n${sys}<turn|>\n` + turns.map(([r, t]) => `<|turn>${r}\n${t}<turn|>\n`).join('') + '<|turn>model\n';
+  }
+  if (fmt === 'chatml') {
+    return `<|im_start|>system\n${sys}<|im_end|>\n`
+      + turns.map(([r, t]) => `<|im_start|>${r === 'model' ? 'assistant' : 'user'}\n${t}<|im_end|>\n`).join('') + '<|im_start|>assistant\n';
+  }
+  // Gemma 2/3/3n はシステム役がないので、最初のユーザー発言の前に入れる
+  return turns.map(([r, t], i) => `<start_of_turn>${r}\n${i === 0 ? sys + '\n\n' : ''}${t}<end_of_turn>\n`).join('') + '<start_of_turn>model\n';
+}
+function localSystemPrompt(){
+  return `あなたは次のキャラクターです: ${st.ai.persona}
+ユーザー（ご主人様）は、自分の意思で、低周波の電気刺激デバイスを使ったソフトな責めプレイを楽しんでいます。あなたは強さと波形を決めて、短いセリフで話しかけます。
+毎回、次の形式の1行だけで答えてください。説明は書かないでください。
+A,B,波形,秒数|セリフ
+- A と B: チャンネルの強さ。0〜100 の整数（上限に対する割合）
+- 波形: 0〜6 の番号（0=一定 1=呼吸 2=潮 3=ゆっくりパルス 4=パルス 5=速いパルス 6=タップ）
+- 秒数: 次に決めるまでの秒数。7〜30
+- 休憩（0,0）もはさんで緩急をつけ、いきなり100にしない
+- ユーザーが「待って」と言ったら必ず 0,0 にする。「弱めて」なら下げる。「もっと強く」なら少し上げる
+- セリフは日本語で40文字以内。露骨な性的表現は使わない
+例:
+0,0,1,10|まずは深呼吸して、待っていてくださいね
+30,0,4,12|少しずつ、いきますよ
+60,40,5,8|油断しましたね？`;
+}
+// 「A,B,波形,秒数|セリフ」を読み取る。全角の記号や前後のゴミにも耐える
+function parseLocalReply(text){
+  const t = String(text || '').replace(/[０-９]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0)).replace(/[，、]/g, ',').replace(/｜/g, '|');
+  const m = t.match(/(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,2})\s*,\s*(\d{1,3})\s*\|\s*([^\n<]*)/);
+  if (!m) throw new Error('AI の返事を読み取れませんでした');
+  return {a:+m[1], b:+m[2], preset:+m[3], hold:+m[4], line:m[5].trim()};
+}
+function localBackend(){
+  return {label:'端末内 AI', minInterval:3000, timeout:LOCAL_TIMEOUT_MS,
+    async prepare(onStatus){
+      try { await loadLocalLlm(onStatus); }
+      catch(e) {
+        // 読み込めないものは何度試しても同じなので、すぐ終了する
+        const err = new Error(e && e.fatal ? e.message : 'モデルを読み込めませんでした: ' + (e && e.message ? e.message : e));
+        err.fatal = true;
+        throw err;
+      }
+    },
+    async ask(userText, history, signal){
+      const llm = await loadLocalLlm(() => {});
+      const fmt = chatFormat(st.local.meta && st.local.meta.name);
+      const prompt = buildLocalPrompt(fmt, localSystemPrompt(), history, userText);
+      const onAbort = () => { try { llm.cancelProcessing && llm.cancelProcessing(); } catch(e) {} };
+      signal.addEventListener('abort', onAbort);
+      try {
+        const raw = await llm.generateResponse(prompt);
+        if (signal.aborted) { const e = new Error('時間切れ'); e.name = 'AbortError'; throw e; }
+        const r = parseLocalReply(raw);
+        return {r, raw:`${r.a},${r.b},${r.preset},${r.hold}|${r.line}`};   // 履歴には整えた形で残す
+      } finally {
+        signal.removeEventListener('abort', onAbort);
+      }
+    },
+    stop(){ try { st.local.llm && st.local.llm.cancelProcessing && st.local.llm.cancelProcessing(); } catch(e) {} }
+  };
 }
 
 // ---------- 受信 ----------
