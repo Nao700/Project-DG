@@ -210,7 +210,7 @@ function sample(p, t, hz){
 const st = {
   dev:null, chW:null, connected:false,
   tA:0, tB:0, aA:null, aB:null,     // 目標 / 本体から通知された実強度（null は不明）
-  seq:0, pending:0, pendingAt:0,
+  seq:0, pending:0, pendingAt:0, wfail:0,
   preset:0, t0:performance.now(), timer:null, qd:0, queue:Promise.resolve(),
   lim:{A:DEFAULTS.limA, B:DEFAULTS.limB}, balF:DEFAULTS.balF, balP:DEFAULTS.balP, pulseHz:DEFAULTS.pulseHz, batt:null, wl:null,
   // おまかせ: ceil は操作役が上げられる上限（ソフトリミット以下に丸める）
@@ -336,7 +336,7 @@ $('#pulseHz').addEventListener('input', e => {
   st.pulseHz = Math.max(PULSE_HZ_MIN, clampInt(e.target.value, PULSE_HZ_MAX, st.pulseHz));
   saveSettings(); render();
 });
-$('#stop').addEventListener('click', () => emergency());
+$('#stop').addEventListener('click', () => emergency(st.connected ? '緊急停止しました（強度0）。スライダーか＋ボタンで強度を上げ直すと再開します' : ''));
 $('#connectBtn').addEventListener('click', () => st.connected ? disconnect() : connect(false));
 $('#scanAllBtn').addEventListener('click', () => { if (!st.connected) connect(true); });
 $('#autoBtn').addEventListener('click', () => {
@@ -401,7 +401,9 @@ function send(buf, urgent){
   if (!st.chW) return;
   if (!urgent && st.qd > 2) return;          // 詰まっているときは周期データを捨てる
   st.qd++;
-  st.queue = st.queue.then(() => st.chW && write(buf)).catch(() => {}).then(() => { st.qd--; });
+  st.queue = st.queue.then(() => st.chW && write(buf))
+    .then(() => { st.wfail = 0; }, () => { st.wfail++; })   // 失敗が続いたら tick が切断扱いにする
+    .then(() => { st.qd--; });
 }
 async function sendBF(){
   const b = new Uint8Array([0xBF, st.lim.A, st.lim.B, st.balF, st.balF, st.balP, st.balP]);
@@ -431,6 +433,7 @@ function stepToward(actual, target){
 // 100msごと。強度の変更はシーケンス番号付きで1回だけ送り、B1の応答を待つ
 function tick(){
   if (!st.connected) return;
+  if (linkDead()) { linkLost(); return; }
   const now = performance.now();
   if (st.pending && now - st.pendingAt > B1_TIMEOUT_MS) st.pending = 0;   // 応答なし。差分が残っていれば下で再送
   let mode = 0, seq = 0, vA = 0, vB = 0;
@@ -441,6 +444,19 @@ function tick(){
     st.pending = seq; st.pendingAt = now;
   }
   send(frame(seq, mode, vA, vB, now - st.t0, false), seq !== 0);
+}
+
+// 切断イベントが来ないまま通信だけ止まることがある（画面を隠したあとなど）。そのときは切断として扱う
+const WRITE_FAIL_MAX = 10;   // 約1秒ぶん送信に失敗し続けたら切断とみなす
+function linkDead(){
+  return !!(st.dev && st.dev.gatt && st.dev.gatt.connected === false) || st.wfail >= WRITE_FAIL_MAX;
+}
+function linkLost(){
+  if (!st.connected) return;
+  const dev = st.dev;
+  onDisc();
+  try { dev && dev.removeEventListener('gattserverdisconnected', onDisc); dev && dev.gatt.connected && dev.gatt.disconnect(); } catch(e) {}
+  msg('本体との通信が切れていました。もう一度「接続」を押してください（強度は0から再開します）');
 }
 
 function emergency(reason){
@@ -935,7 +951,8 @@ async function wake(){
 // 画面が隠れるとタイマーが止まり、出力の制御ができなくなる。安全側に倒して止める
 document.addEventListener('visibilitychange', () => {
   if (!st.connected) return;
-  if (document.hidden) emergency('画面が隠れたため緊急停止しました');
+  if (document.hidden) emergency('画面が隠れたため緊急停止しました。戻ったらスライダーか＋ボタンで再開できます');
+  else if (linkDead()) linkLost();
   else wake();
 });
 
@@ -943,7 +960,7 @@ function onDisc(){
   if (st.auto.on) autoEnd();
   clearInterval(st.timer); st.timer = null;
   st.connected = false; st.chW = null; st.dev = null;
-  st.tA = st.tB = 0; st.aA = st.aB = null; st.pending = 0;
+  st.tA = st.tB = 0; st.aA = st.aB = null; st.pending = 0; st.wfail = 0;
   msg('切断されました');
   render();
 }
@@ -983,7 +1000,7 @@ async function connect(all){
       try { await cb.startNotifications(); } catch(e) {}
     } catch(e) {}
     st.dev = dev;
-    st.tA = st.tB = 0; st.aA = st.aB = null; st.pending = 0;   // 実強度は不明扱い → 最初のB0で0を明示的に送る
+    st.tA = st.tB = 0; st.aA = st.aB = null; st.pending = 0; st.wfail = 0;   // 実強度は不明扱い → 最初のB0で0を明示的に送る
     await sendBF();                          // 接続直後に必ず上限を設定
     st.connected = true;
     st.t0 = performance.now();
@@ -1005,7 +1022,10 @@ async function connect(all){
 }
 function disconnect(){
   emergency();
-  setTimeout(() => { try { st.dev && st.dev.gatt.disconnect(); } catch(e) {} }, 250);
+  setTimeout(() => {
+    try { st.dev && st.dev.gatt.disconnect(); } catch(e) {}
+    if (st.connected) onDisc();   // 既に切れていると切断イベントが来ず「接続中」のまま残るため
+  }, 250);
 }
 
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
